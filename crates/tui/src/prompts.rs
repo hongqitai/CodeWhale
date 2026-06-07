@@ -719,6 +719,12 @@ fn default_approval_mode_for_mode(mode: AppMode) -> ApprovalMode {
 /// producing a broken heading hierarchy (## under ####).
 fn taxonomy_body(mode: AppMode) -> String {
     let block = render_core_tool_taxonomy_block(mode);
+    debug_assert!(
+        block.starts_with("## Core Tool Taxonomy\n\n"),
+        "render_core_tool_taxonomy_block format changed — \
+         taxonomy_body expects `## Core Tool Taxonomy\\n\\n` prefix; \
+         update the prefix or the assertion"
+    );
     block
         .strip_prefix("## Core Tool Taxonomy\n\n")
         .unwrap_or(&block)
@@ -748,19 +754,19 @@ pub(crate) fn render_runtime_policy_reference() -> String {
 
     out.push_str("#### agent\n\n");
     out.push_str(&taxonomy_agent);
-    out.push('\n');
+    out.push_str("\n\n");
     out.push_str(AGENT_MODE.trim());
     out.push_str("\n\n");
 
     out.push_str("#### plan\n\n");
     out.push_str(&taxonomy_plan);
-    out.push('\n');
+    out.push_str("\n\n");
     out.push_str(PLAN_MODE.trim());
     out.push_str("\n\n");
 
     out.push_str("#### yolo\n\n");
     out.push_str(&taxonomy_yolo);
-    out.push('\n');
+    out.push_str("\n\n");
     out.push_str(YOLO_MODE.trim());
     out.push_str("\n\n");
 
