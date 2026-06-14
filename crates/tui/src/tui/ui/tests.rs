@@ -3765,6 +3765,7 @@ fn make_subagent(
         model: "deepseek-v4-flash".to_string(),
         nickname: None,
         status,
+        worker_status: None,
         result: None,
         steps_taken: 0,
         checkpoint: None,

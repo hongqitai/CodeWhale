@@ -623,6 +623,8 @@ pub struct SubAgentResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
     pub status: SubAgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_status: Option<AgentWorkerStatus>,
     pub result: Option<String>,
     pub steps_taken: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1552,6 +1554,7 @@ impl SubAgent {
             model: self.model.clone(),
             nickname: self.nickname.clone(),
             status: self.status.clone(),
+            worker_status: None,
             result: self.result.clone(),
             steps_taken: self.steps_taken,
             checkpoint: self.checkpoint.clone(),
@@ -2482,6 +2485,10 @@ impl SubAgentManager {
     fn snapshot_for_listing(&self, agent: &SubAgent) -> SubAgentResult {
         let mut snap = agent.snapshot();
         snap.from_prior_session = self.is_from_prior_session(agent);
+        snap.worker_status = self
+            .worker_records
+            .get(&agent.id)
+            .map(|record| record.status);
         snap
     }
 
@@ -2868,12 +2875,17 @@ async fn subagent_session_projection(
         .as_ref()
         .map(|record| record.verification.clone())
         .unwrap_or_else(default_agent_run_verification);
+    let status = worker_record
+        .as_ref()
+        .map(|record| agent_worker_status_name(record.status))
+        .unwrap_or_else(|| subagent_status_name(&snapshot.status))
+        .to_string();
 
     SubAgentSessionProjection {
         name: snapshot.name.clone(),
         agent_id: snapshot.agent_id.clone(),
         run_id,
-        status: subagent_status_name(&snapshot.status).to_string(),
+        status,
         terminal: snapshot.status != SubAgentStatus::Running,
         context_mode: snapshot.context_mode.clone(),
         fork_context: snapshot.fork_context,
@@ -5210,6 +5222,7 @@ async fn run_subagent(
                 model: runtime.model.clone(),
                 nickname: None,
                 status,
+                worker_status: None,
                 result: None,
                 steps_taken: steps,
                 checkpoint: latest_checkpoint.clone(),
@@ -5324,6 +5337,7 @@ async fn run_subagent(
                         model: runtime.model.clone(),
                         nickname: None,
                         status,
+                        worker_status: None,
                         result: None,
                         steps_taken: steps,
                         checkpoint: latest_checkpoint.clone(),
@@ -5629,6 +5643,7 @@ async fn run_subagent(
         model: runtime.model.clone(),
         nickname: None,
         status,
+        worker_status: None,
         result: final_result,
         steps_taken: steps,
         checkpoint: latest_checkpoint,
@@ -6413,6 +6428,21 @@ fn worker_status_from_subagent_status(status: &SubAgentStatus) -> AgentWorkerSta
         SubAgentStatus::Failed(_) => AgentWorkerStatus::Failed,
         SubAgentStatus::Cancelled => AgentWorkerStatus::Cancelled,
         SubAgentStatus::Interrupted(_) => AgentWorkerStatus::Interrupted,
+    }
+}
+
+pub fn agent_worker_status_name(status: AgentWorkerStatus) -> &'static str {
+    match status {
+        AgentWorkerStatus::Queued => "queued",
+        AgentWorkerStatus::Starting => "starting",
+        AgentWorkerStatus::Running => "running",
+        AgentWorkerStatus::WaitingForUser => "waiting_for_user",
+        AgentWorkerStatus::ModelWait => "model_wait",
+        AgentWorkerStatus::RunningTool => "running_tool",
+        AgentWorkerStatus::Completed => "completed",
+        AgentWorkerStatus::Failed => "failed",
+        AgentWorkerStatus::Cancelled => "cancelled",
+        AgentWorkerStatus::Interrupted => "interrupted",
     }
 }
 

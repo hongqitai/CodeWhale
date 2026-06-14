@@ -21,6 +21,7 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
         model: "deepseek-v4-flash".to_string(),
         nickname: None,
         status,
+        worker_status: None,
         result: None,
         steps_taken: 0,
         checkpoint: None,
@@ -749,7 +750,7 @@ async fn interrupted_projection_exposes_checkpoint_metadata_and_messages() {
     let ctx = ToolContext::new(".");
     let projection = subagent_session_projection(snapshot, false, &ctx, None).await;
 
-    assert_eq!(projection.status, "interrupted");
+    assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.terminal);
     assert!(projection.continuable);
     assert_eq!(
@@ -1649,7 +1650,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         .expect("agent_eval should project interrupted checkpoint");
     let projection: SubAgentSessionProjection =
         serde_json::from_str(&result.content).expect("projection deserializes");
-    assert_eq!(projection.status, "interrupted");
+    assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.continuable);
     assert!(projection.checkpoint.is_some());
     assert!(
@@ -1698,7 +1699,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
     );
     let projection: SubAgentSessionProjection =
         serde_json::from_str(&result.content).expect("projection deserializes");
-    assert_eq!(projection.status, "interrupted");
+    assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.needs_input.is_some());
     assert_eq!(
         calls.load(Ordering::SeqCst),
