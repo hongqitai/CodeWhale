@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Retroactive credits
+
+A credit-reconciliation pass found shipped community fixes that were never
+recorded in this changelog. Crediting them now, with the version they shipped in:
+
+- Global `~/.deepseek/AGENTS.md` fallback loading — thanks @manaskarra (fix) and @xfy6238 (report) (#1157, v0.8.27)
+- CRLF SSE event parsing for MCP — thanks @reidliu41 (fix) and @djairjr (report) (#1309, v0.8.29)
+- Reduce-motion default on VTE/flicker terminals — thanks @Geallier (report) (#1470, v0.8.34)
+- `portable-pty` 0.9 upgrade for LoongArch64 — thanks @quentin-lian (fix) and @k0tran (report) (#1531, #1992, v0.8.46)
+- `DEEPSEEK_ALLOW_INSECURE_HTTP` guard for LAN vLLM — thanks @F1LT3R (report) (#1656, v0.8.47)
+- Hidden `reasoning_content` kept in English regardless of locale — thanks @cmyyy (report) (#1842, v0.8.47)
+- `ExternalTool` abstraction layer — thanks @aboimpinto (#1794, #2294, v0.8.48)
+- Ephemeral generated project context — thanks @Final527 (report) (#3058, v0.8.59)
+
 ## [0.8.61] - 2026-06-14
 
 This release lands the **runtime control plane** for multi-agent work: the TUI stays
