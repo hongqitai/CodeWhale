@@ -17,6 +17,17 @@
         npm run check
         npm test
 
+.rust_workspace_gates_stage: &rust_workspace_gates_stage
+  name: rust workspace gates
+  script: |
+    set -eu
+    ./scripts/release/check-versions.sh
+    ./scripts/release/check-ohos-deps.sh
+    cargo fmt --all -- --check
+    cargo check --workspace --all-targets --locked
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo test --workspace --all-features --locked
+
 .linux_rust_gates: &linux_rust_gates
   name: linux rust gates
   runner:
@@ -34,15 +45,7 @@
           rustup component add rustfmt clippy
         fi
 
-    - name: rust workspace gates
-      script: |
-        set -eu
-        ./scripts/release/check-versions.sh
-        ./scripts/release/check-ohos-deps.sh
-        cargo fmt --all -- --check
-        cargo check --workspace --all-targets --locked
-        cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-        cargo test --workspace --all-features --locked
+    - *rust_workspace_gates_stage
 
     - name: linux npm wrapper smoke
       script: |
@@ -70,15 +73,7 @@
           rustup component add rustfmt clippy
         fi
 
-    - name: rust workspace gates
-      script: |
-        set -eu
-        ./scripts/release/check-versions.sh
-        ./scripts/release/check-ohos-deps.sh
-        cargo fmt --all -- --check
-        cargo check --workspace --all-targets --locked
-        cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-        cargo test --workspace --all-features --locked
+    - *rust_workspace_gates_stage
 
     - name: crate publish dry-run
       script: |
