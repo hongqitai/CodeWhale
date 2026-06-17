@@ -1176,7 +1176,7 @@ impl StateStore {
                 SELECT ?1, ?2, ?3, ?4, ?5, ?6
                 RETURNING id
             "#, params![thread_id, role, content, item_json, created_at, message_id], |row| row.get(0)
-        ).with_context(|| format!("failed to fork at message for thread {:?}", thread_id))?;
+        ).with_context(|| format!("failed to fork at message for thread {thread_id:?}"))?;
 
         tx.execute(
             r#"
@@ -1187,10 +1187,7 @@ impl StateStore {
             params![next_leaf_id, thread_id],
         )
         .with_context(|| {
-            format!(
-                "failed to update thread current leaf id for thread {:?}",
-                thread_id
-            )
+            format!("failed to update thread current leaf id for thread {thread_id:?}")
         })?;
 
         tx.commit()
