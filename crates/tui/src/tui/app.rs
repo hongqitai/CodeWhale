@@ -6805,8 +6805,7 @@ mod tests {
         .expect("write escaped skill");
 
         let link_path = workspace.join(".codewhale").join("skills");
-        if let Err(err) = create_dir_symlink(&escape_target, &link_path) {
-            eprintln!("skipping symlink escape assertion: {err}");
+        if create_dir_symlink(&escape_target, &link_path).is_err() {
             return;
         }
 

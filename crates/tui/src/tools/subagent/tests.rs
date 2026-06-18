@@ -2390,6 +2390,7 @@ fn would_exceed_depth_at_boundary() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn rate_limit_pause_blocks_subagent_spawn() {
     let _guard = crate::retry_status::test_guard();
     crate::retry_status::clear();

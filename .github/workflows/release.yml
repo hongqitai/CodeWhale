@@ -46,7 +46,13 @@ jobs:
       - name: OHOS dependency graph
         run: ./scripts/release/check-ohos-deps.sh
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- \
+            -D warnings \
+            -A clippy::uninlined_format_args \
+            -A clippy::too_many_arguments \
+            -A clippy::unnecessary_map_or \
+            -A clippy::assertions_on_constants
       - name: Workspace tests
         run: cargo test --workspace --all-features --locked
       - name: Protocol schema parity

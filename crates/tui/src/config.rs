@@ -6124,7 +6124,7 @@ mod tests {
         ];
         let _env_guards: Vec<_> = cases
             .iter()
-            .map(|(_, var, value)| EnvVarGuard::set(*var, *value))
+            .map(|(_, var, value)| EnvVarGuard::set(var, value))
             .collect();
 
         for (provider, _, expected_key) in cases {
