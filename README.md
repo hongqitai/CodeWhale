@@ -137,6 +137,12 @@ Switch mid-session with `/provider` and `/model`. The full registry —
 credentials, base URLs, capability boundaries — lives in
 [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
+Atlas Cloud is included as an OpenAI-compatible hosted route for users who want
+its curated catalog behind one key: set `DEEPSEEK_PROVIDER=atlascloud`,
+`ATLASCLOUD_API_KEY`, and optionally `ATLASCLOUD_MODEL`, for example
+`deepseek-ai/deepseek-v4-pro`. Atlas model IDs pass through as selected; use
+Atlas's model catalog or Coding Plan page for the current list and pricing.
+
 ## What makes CodeWhale different
 
 As a project evolves, the instructions pile up and they inevitably conflict: the
