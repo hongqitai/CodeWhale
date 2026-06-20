@@ -78,6 +78,20 @@ Overrides:
 
 If both are set, `--config` wins. Environment variable overrides are applied after the file is loaded.
 
+### TUI editability audit
+
+Inside the TUI, run `/config audit` to see which documented keys can be changed
+from the current session, which ones can also be persisted, and which ones stay
+file-only or restart-only. The audit includes current values for the high-impact
+runtime controls such as `approval_policy`, `allow_shell`,
+`stream_chunk_timeout_secs`, `base_url`, `mcp_config_path`, and the
+`[subagents]` concurrency/depth/timeout keys.
+
+Use the command's "Command / reason" column as the source of truth before
+editing by hand. For example, `/config approval_mode on-request --save` writes
+top-level `approval_policy = "on-request"`, while provider base URLs are saved
+but still require restarting the model client.
+
 ### User workspace entries
 
 For a shell opt-in that should live in the user's global config rather than in
