@@ -58,6 +58,12 @@ retry while an equivalent fleet worker would retry and preserve ledger evidence,
 then the cutover is incomplete. Treat that as a CodeWhale runtime gap, not as
 normal "sub-agent behavior".
 
+The compatibility `agent` runtime now retries transient provider header,
+stream, and timeout failures with backoff before marking a worker interrupted;
+when retries are exhausted it preserves a checkpoint and returns a continuation
+handle. The remaining convergence work is to keep that lifecycle durable across
+process restarts, remote execution, and full fleet-ledger scheduling.
+
 The target rule is:
 
 - durable or long-running work goes through the fleet worker lifecycle;
