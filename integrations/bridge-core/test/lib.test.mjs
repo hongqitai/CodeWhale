@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import {
   activeTurnBlock,
@@ -12,7 +15,8 @@ import {
   parseTextContent,
   preservedChatStateFields,
   splitMessage,
-  stripGroupPrefix
+  stripGroupPrefix,
+  ThreadStore
 } from "../src/lib.mjs";
 
 test("env and primitive parsers handle bridge env conventions", () => {
@@ -78,4 +82,36 @@ test("state/message/runtime helpers preserve bridge behavior", () => {
     turnId: "t1",
     message: "Thread already has active turn t1. Wait for it to finish or send /interrupt."
   });
+});
+
+test("ThreadStore supports chat state, message dedupe, and action tokens", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "codewhale-bridge-core-"));
+  try {
+    const statePath = path.join(dir, "thread-map.json");
+    const store = await ThreadStore.open(statePath, {
+      messageLimit: 2,
+      actions: true,
+      actionLimit: 2
+    });
+
+    await store.setChat("chat-a", { threadId: "thread-a" });
+    assert.equal((await store.getChat("chat-a")).threadId, "thread-a");
+
+    assert.equal(await store.recordMessage("m1"), false);
+    assert.equal(await store.recordMessage("m1"), true);
+    assert.equal(await store.recordMessage("m2"), false);
+    assert.equal(await store.recordMessage("m3"), false);
+    assert.deepEqual(store.data.messages, ["m2", "m3"]);
+
+    const token = await store.putAction({ kind: "resume", threadId: "thread-a" });
+    assert.equal((await store.getAction(token)).kind, "resume");
+    assert.equal((await store.takeAction(token)).threadId, "thread-a");
+    assert.equal(await store.getAction(token), null);
+
+    const saved = await ThreadStore.open(statePath, { messageLimit: 2, actions: true });
+    assert.equal((await saved.getChat("chat-a")).threadId, "thread-a");
+    assert.deepEqual(saved.data.messages, ["m2", "m3"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

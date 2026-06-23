@@ -1,3 +1,138 @@
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+const DEFAULT_ACTION_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function chmodBestEffort(filePath, mode) {
+  try {
+    await chmod(filePath, mode);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+  }
+}
+
+export class ThreadStore {
+  static async open(filePath, options = {}) {
+    const store = new ThreadStore(filePath, options);
+    await store.load();
+    return store;
+  }
+
+  constructor(filePath, options = {}) {
+    this.filePath = filePath;
+    this.options = {
+      messageLimit: options.messageLimit || 0,
+      actions: options.actions === true,
+      actionLimit: options.actionLimit || 200,
+      actionTtlMs: options.actionTtlMs || DEFAULT_ACTION_TTL_MS,
+      privateMode: options.privateMode === true
+    };
+    this.data = { chats: {} };
+    this.ensureShape();
+  }
+
+  ensureShape() {
+    if (!this.data || typeof this.data !== "object") this.data = {};
+    if (!this.data.chats || typeof this.data.chats !== "object") this.data.chats = {};
+    if (this.options.messageLimit > 0 && !Array.isArray(this.data.messages)) {
+      this.data.messages = [];
+    }
+    if (this.options.actions && (!this.data.actions || typeof this.data.actions !== "object")) {
+      this.data.actions = {};
+    }
+  }
+
+  async load() {
+    try {
+      const raw = await readFile(this.filePath, "utf8");
+      this.data = JSON.parse(raw);
+      this.ensureShape();
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+
+  async recordMessage(messageKey) {
+    if (!messageKey || this.options.messageLimit <= 0) return false;
+    this.ensureShape();
+    if (this.data.messages.includes(messageKey)) return true;
+    this.data.messages.push(messageKey);
+    this.data.messages = this.data.messages.slice(-this.options.messageLimit);
+    await this.save();
+    return false;
+  }
+
+  async getChat(chatId) {
+    return this.data.chats[chatId] || null;
+  }
+
+  listChats() {
+    return Object.entries(this.data.chats || {});
+  }
+
+  async setChat(chatId, state) {
+    this.data.chats[chatId] = state;
+    await this.save();
+    return state;
+  }
+
+  async patchChat(chatId, patch) {
+    const current = this.data.chats[chatId] || {};
+    this.data.chats[chatId] = { ...current, ...patch };
+    await this.save();
+    return this.data.chats[chatId];
+  }
+
+  async putAction(action) {
+    if (!this.options.actions) return "";
+    this.ensureShape();
+    const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    this.data.actions[token] = {
+      ...action,
+      createdAt: new Date().toISOString()
+    };
+    this.pruneActions();
+    await this.save();
+    return token;
+  }
+
+  async getAction(token) {
+    if (!token || !this.options.actions) return null;
+    this.ensureShape();
+    return this.data.actions[token] || null;
+  }
+
+  async takeAction(token) {
+    const action = await this.getAction(token);
+    if (action) {
+      delete this.data.actions[token];
+      await this.save();
+    }
+    return action;
+  }
+
+  pruneActions() {
+    if (!this.options.actions) return;
+    const cutoff = Date.now() - this.options.actionTtlMs;
+    const fresh = Object.entries(this.data.actions || {}).filter(([, action]) => {
+      const time = Date.parse(action.createdAt || "");
+      return Number.isFinite(time) && time >= cutoff;
+    });
+    this.data.actions = Object.fromEntries(fresh.slice(-this.options.actionLimit));
+  }
+
+  async save() {
+    const dir = path.dirname(this.filePath);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    if (this.options.privateMode) await chmodBestEffort(dir, 0o700);
+    const tmp = `${this.filePath}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
+    if (this.options.privateMode) await chmodBestEffort(tmp, 0o600);
+    await rename(tmp, this.filePath);
+    if (this.options.privateMode) await chmodBestEffort(this.filePath, 0o600);
+  }
+}
+
 export function envFirst(env, ...names) {
   for (const name of names) {
     const value = env?.[name];

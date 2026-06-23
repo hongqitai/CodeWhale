@@ -1,6 +1,3 @@
-import { readFile, writeFile, mkdir, rename, chmod } from "node:fs/promises";
-import path from "node:path";
-
 import {
   activeTurnBlock,
   cleanEnvValue,
@@ -15,7 +12,8 @@ import {
   parseTextContent as coreParseTextContent,
   preservedChatStateFields,
   splitMessage,
-  stripGroupPrefix as coreStripGroupPrefix
+  stripGroupPrefix as coreStripGroupPrefix,
+  ThreadStore as CoreThreadStore
 } from "../../bridge-core/src/lib.mjs";
 
 export {
@@ -103,66 +101,9 @@ export function helpText() {
   ].join("\n");
 }
 
-export class ThreadStore {
-  static async open(filePath) {
-    const store = new ThreadStore(filePath);
-    await store.load();
-    return store;
-  }
-
+export class ThreadStore extends CoreThreadStore {
   constructor(filePath) {
-    this.filePath = filePath;
-    this.data = { chats: {} };
-  }
-
-  async load() {
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      this.data = JSON.parse(raw);
-      if (!this.data.chats) this.data.chats = {};
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
-
-  async getChat(chatId) {
-    return this.data.chats[chatId] || null;
-  }
-
-  listChats() {
-    return Object.entries(this.data.chats || {});
-  }
-
-  async setChat(chatId, state) {
-    this.data.chats[chatId] = state;
-    await this.save();
-    return state;
-  }
-
-  async patchChat(chatId, patch) {
-    const current = this.data.chats[chatId] || {};
-    this.data.chats[chatId] = { ...current, ...patch };
-    await this.save();
-    return this.data.chats[chatId];
-  }
-
-  async save() {
-    const dir = path.dirname(this.filePath);
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await chmodBestEffort(dir, 0o700);
-    const tmp = `${this.filePath}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
-    await chmodBestEffort(tmp, 0o600);
-    await rename(tmp, this.filePath);
-    await chmodBestEffort(this.filePath, 0o600);
-  }
-}
-
-async function chmodBestEffort(filePath, mode) {
-  try {
-    await chmod(filePath, mode);
-  } catch (error) {
-    if (process.platform !== "win32") throw error;
+    super(filePath, { privateMode: true });
   }
 }
 
