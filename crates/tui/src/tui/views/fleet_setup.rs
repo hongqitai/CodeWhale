@@ -391,6 +391,12 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                 FleetSetupRow::new("fast", "scout", "opt-in low-latency fanout"),
                 FleetSetupRow::new("balanced", "auto class", "normal build/review when chosen")
                     .tone(RowTone::Ready),
+                FleetSetupRow::new(
+                    "preset",
+                    "editable",
+                    "recommended tiers never force the orchestrator",
+                )
+                .tone(RowTone::Current),
                 FleetSetupRow::new("strong", "hard", "security, release, architecture"),
                 FleetSetupRow::new(
                     "fixed model",
@@ -460,6 +466,18 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
             subtitle: "team and recursion",
             rows: vec![
                 FleetSetupRow::new(
+                    "Fleet config",
+                    "sub-agents",
+                    "durable slots, profiles, models, tools, ledger",
+                )
+                .tone(RowTone::Current),
+                FleetSetupRow::new(
+                    "WhaleFlow",
+                    "agent plan",
+                    "agent-authored workflow selects and monitors slots",
+                )
+                .tone(RowTone::Ready),
+                FleetSetupRow::new(
                     "role workers",
                     if snapshot.subagents_enabled {
                         "enabled"
@@ -486,25 +504,20 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                 )
                 .tone(RowTone::Ready),
                 FleetSetupRow::new(
-                    "starter team",
-                    "3 scout + 1 each",
-                    "builder, reviewer, verifier, synthesizer, operator",
+                    "slot grid",
+                    "1-5 slots",
+                    "add or drill right into a recursive ring",
                 )
                 .tone(RowTone::Ready),
                 FleetSetupRow::new(
-                    "scout tree",
-                    "3 scouts",
-                    "recursive exploration splits breadth-first",
+                    "limits",
+                    "100 total / depth 5",
+                    "workflow population cap, separate from launch concurrency",
                 ),
                 FleetSetupRow::new(
-                    "builder tree",
-                    "builder+reviewer",
-                    "implementation gets paired review by default",
-                ),
-                FleetSetupRow::new(
-                    "verifier tree",
-                    "verifier+reviewer",
-                    "test evidence gets interpreted before handoff",
+                    "DeepSeek preset",
+                    "Pro -> Flash",
+                    "editable per slot; cheaper as rings expand",
                 ),
                 FleetSetupRow::new(
                     "budget",
@@ -697,9 +710,12 @@ fn profile_authoring_prompt(
          Do not include provider, base_url, api_key, auth, secrets, trust, allow_shell, or approval_required=false.\n\
          If model is present, keep it to a visible model id such as deepseek-v4-pro or glm-5.2.\n\
          Fleet product shape:\n\
+         - Fleet is the durable sub-agent config surface: slots, profiles, models, tools, and ledger\n\
          - one main orchestrator profile coordinates the Fleet run and verifies returned claims\n\
          - workers are summoned as focused Fleet members with only their assigned slice\n\
          - default model behavior is same-route inheritance; choose fast/strong/code/review only when the role needs it\n\
+         - DeepSeek-style model tiers are recommendations, not hierarchy rules; every slot may override model\n\
+         - WhaleFlow plans may select and monitor Fleet slots, but Fleet owns the worker config\n\
          - do not encode a recursive worker tree in [instructions].text; topology belongs to the orchestrator, not each worker\n\n\
          Keep the profile permission-narrowing and compatible with recursive Fleet role workers.",
         provider = snapshot.provider,
@@ -767,8 +783,11 @@ mod tests {
                 assert!(text.contains("provider = DeepSeek"));
                 assert!(text.contains("model (optional explicit model id"));
                 assert!(text.contains("Do not include provider, base_url"));
+                assert!(text.contains("Fleet is the durable sub-agent config surface"));
                 assert!(text.contains("workers are summoned as focused Fleet members"));
                 assert!(text.contains("default model behavior is same-route inheritance"));
+                assert!(text.contains("model tiers are recommendations"));
+                assert!(text.contains("Fleet owns the worker config"));
                 assert!(text.contains("topology belongs to the orchestrator"));
             }
             other => panic!("expected profile prompt insertion, got {other:?}"),
@@ -813,6 +832,10 @@ mod tests {
         assert!(view.profile_prompt().contains("same-route inheritance"));
         assert!(
             view.profile_prompt()
+                .contains("durable sub-agent config surface")
+        );
+        assert!(
+            view.profile_prompt()
                 .contains("topology belongs to the orchestrator")
         );
         assert!(!view.profile_prompt().contains("builder + reviewer"));
@@ -833,7 +856,13 @@ mod tests {
             view.lanes
                 .iter()
                 .flat_map(|lane| lane.rows.iter())
-                .any(|row| row.label == "starter team" && row.value == "3 scout + 1 each")
+                .any(|row| row.label == "slot grid" && row.value == "1-5 slots")
+        );
+        assert!(
+            view.lanes
+                .iter()
+                .flat_map(|lane| lane.rows.iter())
+                .any(|row| row.label == "limits" && row.value == "100 total / depth 5")
         );
         view.render(Rect::new(0, 0, 120, 32), &mut buf);
         let rendered = buf
@@ -844,5 +873,6 @@ mod tests {
 
         assert!(rendered.contains("Fleet"));
         assert!(rendered.contains("recursion"));
+        assert!(rendered.contains("WhaleFlow"));
     }
 }
