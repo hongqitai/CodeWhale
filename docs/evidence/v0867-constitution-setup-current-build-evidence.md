@@ -73,6 +73,23 @@ jq empty crates/tui/locales/en.json crates/tui/locales/es-419.json crates/tui/lo
 
 Result: passed.
 
+## Localization Coverage and Fallback (zh-Hant)
+
+The v0.8.67 setup/constitution surfaces are fully localized for `en` and
+`zh-Hans` (545+ message keys each). `zh-Hant` ships a partial catalog
+(~162 keys) that does not yet include the setup/constitution strings.
+
+Documented fallback behavior for the strings zh-Hant does not carry: the
+runtime message loader is initialized with `i18n!("locales", fallback =
+["en"])` (`crates/tui/src/main.rs`), so untranslated zh-Hant keys render in
+**English**. The `LocaleSpec { fallback: "zh-Hans" }` entry in
+`crates/tui/src/localization.rs` is descriptive metadata only and is not
+wired into message resolution; a per-locale zh-Hant → zh-Hans chain would be
+a behavior change and is deliberately left out of v0.8.67. This satisfies
+the #3412/#3794 acceptance alternative of "documented fallback" for
+zh-Hant; full zh-Hant coverage (or a zh-Hans fallback chain) remains open
+as follow-up localization work.
+
 ## Remaining Manual Evidence
 
 Before the release is called ready, keep the final manual pass from the QA
