@@ -383,6 +383,25 @@ impl SetupWizardView {
         })
     }
 
+    fn commit_setup_report(&mut self) -> ViewAction {
+        let mut state = self.state.clone();
+        let status = if setup_report_ready(&state) {
+            StepStatus::Verified
+        } else {
+            StepStatus::NeedsAction
+        };
+        state.set_step(
+            SetupStep::Verification,
+            StepEntry::new(status, false, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(setup_report_result(&state)),
+        );
+        self.state = state.clone();
+        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, MessageId::SetupReportRecorded).to_string(),
+        })
+    }
+
     fn commit_constitution(&self, kind: SetupCommitKind) -> ViewAction {
         let choice = match kind {
             SetupCommitKind::BundledConstitution => ConstitutionChoice::Bundled,
@@ -472,6 +491,9 @@ impl ModalView for SetupWizardView {
             }
             KeyCode::Enter if self.selected_step() == SetupStep::TrustSandbox => {
                 self.commit_runtime_posture_review()
+            }
+            KeyCode::Enter if self.selected_step() == SetupStep::Verification => {
+                self.commit_setup_report()
             }
             KeyCode::Enter => {
                 self.move_next();
@@ -592,6 +614,7 @@ impl SetupWizardView {
         match self.selected_step() {
             SetupStep::ProviderModel => self.provider_model_detail_lines(),
             SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
+            SetupStep::Verification => self.verification_detail_lines(),
             _ => Vec::new(),
         }
     }
@@ -636,6 +659,93 @@ impl SetupWizardView {
         ]
     }
 
+    fn verification_detail_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            self.detail_row(
+                MessageId::SetupReportFirstRunLabel,
+                &self.ready_label(self.state.first_run_ready()),
+            ),
+            self.detail_row(
+                MessageId::SetupReportUpdateLabel,
+                &self.ready_label(self.state.update_ready(CONSTITUTION_CHECKPOINT_VERSION)),
+            ),
+            self.detail_row(
+                MessageId::SetupReportSourceLabel,
+                &self.state_source_label(),
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupReportRowsLabel).to_string(),
+                Style::default()
+                    .fg(palette::TEXT_MUTED)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ];
+
+        for spec in STEP_SPECS {
+            let step = spec.id();
+            let entry = self.state.steps.get(&step);
+            let required = entry.map_or(spec.required(), |entry| entry.required);
+            let required_label = if required {
+                tr(self.locale, MessageId::SetupReportRequired)
+            } else {
+                tr(self.locale, MessageId::SetupReportOptional)
+            };
+            let mut value = format!(
+                "{} ({})",
+                self.status_label(self.state.status(step)),
+                required_label
+            );
+            if let Some(version) = entry.and_then(|entry| entry.version.as_deref()) {
+                value.push_str(&format!(" · {version}"));
+            }
+            if let Some(result) = entry.and_then(|entry| entry.result.as_deref()) {
+                value.push_str(&format!(" · {result}"));
+            }
+            lines.push(self.detail_row(spec.title_id(), &value));
+        }
+
+        lines.push(Line::from(""));
+        let next_action = tr(self.locale, self.next_action_id()).to_string();
+        lines.push(self.detail_row(MessageId::SetupReportNextActionLabel, &next_action));
+        lines
+    }
+
+    fn ready_label(&self, ready: bool) -> String {
+        if ready {
+            tr(self.locale, MessageId::SetupReportReady).to_string()
+        } else {
+            tr(self.locale, MessageId::SetupStatusNeedsAction).to_string()
+        }
+    }
+
+    fn state_source_label(&self) -> String {
+        if self.state.inherited {
+            tr(self.locale, MessageId::SetupReportInherited).to_string()
+        } else {
+            tr(self.locale, MessageId::SetupReportPersisted).to_string()
+        }
+    }
+
+    fn next_action_id(&self) -> MessageId {
+        if !self.state.update_ready(CONSTITUTION_CHECKPOINT_VERSION) {
+            return MessageId::SetupReportNextActionConstitution;
+        }
+        if !matches!(
+            self.state.status(SetupStep::ProviderModel),
+            StepStatus::Verified | StepStatus::NeedsAction
+        ) {
+            return MessageId::SetupReportNextActionProvider;
+        }
+        if !self.state.runtime_posture_source.is_reviewed() {
+            return MessageId::SetupReportNextActionRuntime;
+        }
+        if !self.state.first_run_ready() {
+            return MessageId::SetupReportNextActionRequired;
+        }
+        MessageId::SetupReportNextActionNone
+    }
+
     fn detail_row(&self, label: MessageId, value: &str) -> Line<'static> {
         Line::from(vec![
             Span::styled(
@@ -647,6 +757,28 @@ impl SetupWizardView {
             Span::raw(value.to_string()),
         ])
     }
+}
+
+fn setup_report_ready(state: &SetupState) -> bool {
+    state.first_run_ready() || state.update_ready(CONSTITUTION_CHECKPOINT_VERSION)
+}
+
+fn setup_report_result(state: &SetupState) -> String {
+    format!(
+        "first_run={}, update={}, constitution={:?}, posture={:?}",
+        if state.first_run_ready() {
+            "ready"
+        } else {
+            "needs_action"
+        },
+        if state.update_ready(CONSTITUTION_CHECKPOINT_VERSION) {
+            "ready"
+        } else {
+            "needs_action"
+        },
+        state.constitution_choice,
+        state.runtime_posture_source
+    )
 }
 
 #[must_use]
@@ -899,5 +1031,92 @@ mod tests {
         );
         assert!(message.contains("Runtime posture reviewed"));
         assert_eq!(view.selected_step(), SetupStep::ToolsMcp);
+    }
+
+    #[test]
+    fn verification_report_records_needs_action_until_checkpoint_complete() {
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Verification,
+            SetupRuntimeFacts::default(),
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(
+            state.status(SetupStep::Verification),
+            StepStatus::NeedsAction
+        );
+        assert!(
+            state
+                .steps
+                .get(&SetupStep::Verification)
+                .and_then(|entry| entry.result.as_deref())
+                .is_some_and(|result| result.contains("update=needs_action"))
+        );
+        assert!(message.contains("Setup report recorded"));
+    }
+
+    #[test]
+    fn verification_report_records_ready_after_bundled_checkpoint() {
+        let mut state = SetupState::default();
+        state.complete_constitution_checkpoint(
+            CONSTITUTION_CHECKPOINT_VERSION,
+            ConstitutionChoice::Bundled,
+        );
+        let mut view = SetupWizardView::new_at_with_facts(
+            state,
+            Locale::En,
+            SetupStep::Verification,
+            SetupRuntimeFacts::default(),
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, .. }) = action else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(state.status(SetupStep::Verification), StepStatus::Verified);
+        assert!(
+            state
+                .steps
+                .get(&SetupStep::Verification)
+                .and_then(|entry| entry.result.as_deref())
+                .is_some_and(|result| result.contains("update=ready"))
+        );
+    }
+
+    #[test]
+    fn verification_detail_lines_show_next_action() {
+        let view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Verification,
+            SetupRuntimeFacts::default(),
+        );
+
+        let text = lines_to_text(view.verification_detail_lines());
+
+        assert!(text.contains("First-run:"));
+        assert!(text.contains("Update checkpoint:"));
+        assert!(text.contains("Complete the constitution checkpoint"));
+    }
+
+    fn lines_to_text(lines: Vec<Line<'static>>) -> String {
+        lines
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

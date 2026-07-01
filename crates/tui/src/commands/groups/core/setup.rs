@@ -5,6 +5,7 @@ use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
 
 use super::CommandResult;
+use codewhale_config::SetupStep;
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "setup",
@@ -22,8 +23,13 @@ impl RegisterCommand for SetupCmd {
 
     fn execute(_app: &mut App, arg: Option<&str>) -> CommandResult {
         match arg.map(str::trim).filter(|arg| !arg.is_empty()) {
-            None | Some("open" | "wizard" | "checkpoint" | "status") => {
+            None | Some("open" | "wizard" | "checkpoint") => {
                 CommandResult::action(AppAction::OpenSetupWizard)
+            }
+            Some("status" | "report" | "verification" | "verify") => {
+                CommandResult::action(AppAction::OpenSetupWizardAt {
+                    step: SetupStep::Verification,
+                })
             }
             Some(other) => CommandResult::error(format!(
                 "Unknown /setup target '{other}'. Try `/setup` to open the setup wizard."
@@ -81,6 +87,21 @@ mod tests {
         let result = SetupCmd::execute(&mut app, Some("checkpoint"));
 
         assert_eq!(result.action, Some(AppAction::OpenSetupWizard));
+        assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn setup_report_opens_verification_step() {
+        let mut app = test_app();
+
+        let result = SetupCmd::execute(&mut app, Some("report"));
+
+        assert_eq!(
+            result.action,
+            Some(AppAction::OpenSetupWizardAt {
+                step: SetupStep::Verification
+            })
+        );
         assert!(result.message.is_none());
     }
 }
