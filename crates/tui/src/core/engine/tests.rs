@@ -4886,6 +4886,50 @@ fn review_only_external_input_gets_read_only_policy_until_write_is_explicit() {
 }
 
 #[test]
+fn external_write_instruction_supersedes_prior_review_only_policy() {
+    let review_only = effective_input_policy(
+        UserInputProvenance::ExternalUser,
+        AppMode::Yolo,
+        "你在帮我看看 外卖部分还哪里没有使用多语言 我看看要不要加",
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    assert_eq!(review_only.mode, AppMode::Plan);
+    assert!(!review_only.trust_mode);
+    assert!(!review_only.auto_approve);
+    assert!(
+        review_only
+            .status
+            .as_deref()
+            .is_some_and(|status| { status.contains("read-only Plan tools") })
+    );
+
+    let later_user_instruction = effective_input_policy(
+        UserInputProvenance::ExternalUser,
+        AppMode::Yolo,
+        "需要修复下",
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    assert_eq!(later_user_instruction.mode, AppMode::Yolo);
+    assert!(later_user_instruction.allow_shell);
+    assert!(later_user_instruction.trust_mode);
+    assert!(later_user_instruction.auto_approve);
+    assert_eq!(
+        later_user_instruction.approval_mode,
+        crate::tui::approval::ApprovalMode::Bypass
+    );
+    assert!(
+        later_user_instruction.status.is_none(),
+        "a fresh external write instruction must not inherit the prior review-only downgrade"
+    );
+}
+
+#[test]
 fn turn_metadata_includes_plan_mode_policy() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
