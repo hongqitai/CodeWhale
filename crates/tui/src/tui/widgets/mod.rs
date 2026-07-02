@@ -5369,7 +5369,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
         let request = crate::tui::approval::ApprovalRequest::new_with_intent(
             "approval-1",
             "exec_shell",
-            "Auto-review policy requires approval: destructive background/headless actions cannot auto-approve",
+            "Built-in safety gate requires approval: destructive background/headless actions cannot auto-approve",
             &serde_json::json!({
                 "command": "cd /Volumes/VIXinSSD/codewhale; cargo clippy -p codewhale-tui --all-targets --locked -- -D warnings 2>&1 | tee /tmp/codewhale-clippy.log",
                 "cwd": "/Volumes/VIXinSSD/codewhale",
@@ -5387,7 +5387,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
         let rendered = buffer_text(&buf, area);
 
         assert!(
-            !rendered.contains("Auto-review policy requires approval"),
+            !rendered.contains("Built-in safety gate requires approval"),
             "policy internals should not be the modal summary:\n{rendered}"
         );
         assert!(

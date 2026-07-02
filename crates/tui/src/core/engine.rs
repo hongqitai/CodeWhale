@@ -3666,7 +3666,14 @@ pub(super) fn auto_review_plan_decision(
         crate::tui::auto_review::AutoReviewAction::Allow
         | crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
         crate::tui::auto_review::AutoReviewAction::HoldForReview => {
-            let reason = format!("Auto-review policy requires approval: {}", decision.reason);
+            // HoldForReview only originates from the built-in safety floor
+            // (configured rules produce Allow/Block), so name the gate
+            // honestly instead of blaming an "auto-review policy" the user
+            // may never have configured (#3883).
+            let reason = format!(
+                "Built-in safety gate requires approval: {}",
+                decision.reason
+            );
             if matches!(approval_mode, crate::tui::approval::ApprovalMode::Never) {
                 AutoReviewPlanDecision::Block(reason)
             } else {

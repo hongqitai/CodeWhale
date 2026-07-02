@@ -483,7 +483,7 @@ fn auto_review_classifies_publish_and_force_prompts_it() {
     assert_eq!(
         decision,
         AutoReviewPlanDecision::ForcePrompt(
-            "Auto-review policy requires approval: publish-like action requires durable review"
+            "Built-in safety gate requires approval: publish-like action requires durable review"
                 .to_string()
         )
     );
@@ -525,7 +525,7 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
     assert_eq!(
         decision,
         AutoReviewPlanDecision::Block(
-            "Auto-review policy requires approval: publish-like action requires durable review"
+            "Built-in safety gate requires approval: publish-like action requires durable review"
                 .to_string()
         )
     );
@@ -591,10 +591,10 @@ fn auto_review_policy_holds_background_destructive_under_suggest() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
-        &json!({"command": "cargo test", "background": true}),
+        &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Suggest,
-        Some("run tests in the background"),
+        Some("wipe the home directory in the background"),
         true,
         false,
     );
@@ -602,7 +602,7 @@ fn auto_review_policy_holds_background_destructive_under_suggest() {
     assert_eq!(
         decision,
         AutoReviewPlanDecision::ForcePrompt(
-            "Auto-review policy requires approval: destructive background/headless action requires durable review"
+            "Built-in safety gate requires approval: destructive background/headless action requires durable review"
                 .to_string()
         )
     );
@@ -619,10 +619,10 @@ fn auto_review_policy_holds_yolo_detached_destructive_tools() {
         let (decision, audit) = auto_review_plan_decision(
             &crate::tui::auto_review::AutoReviewPolicy::default(),
             "exec_shell",
-            &json!({"command": "cargo test", "background": true}),
+            &json!({"command": "rm -rf ~/", "background": true}),
             run_origin,
             crate::tui::approval::ApprovalMode::Bypass,
-            Some("run tests in the background"),
+            Some("wipe the home directory in the background"),
             true,
             false,
         );
@@ -630,7 +630,7 @@ fn auto_review_policy_holds_yolo_detached_destructive_tools() {
         assert_eq!(
             decision,
             AutoReviewPlanDecision::ForcePrompt(
-                "Auto-review policy requires approval: destructive background/headless action requires durable review"
+                "Built-in safety gate requires approval: destructive background/headless action requires durable review"
                     .to_string()
             )
         );
@@ -645,10 +645,10 @@ fn auto_review_policy_blocks_background_destructive_under_never() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
-        &json!({"command": "cargo test", "background": true}),
+        &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Never,
-        Some("run tests in the background"),
+        Some("wipe the home directory in the background"),
         true,
         false,
     );
@@ -656,7 +656,7 @@ fn auto_review_policy_blocks_background_destructive_under_never() {
     assert_eq!(
         decision,
         AutoReviewPlanDecision::Block(
-            "Auto-review policy requires approval: destructive background/headless action requires durable review"
+            "Built-in safety gate requires approval: destructive background/headless action requires durable review"
                 .to_string()
         )
     );
@@ -2625,7 +2625,7 @@ async fn yolo_mode_does_not_prompt_for_model_driven_typed_ask_rule() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn yolo_mode_prompts_for_background_shell_safety_floor() {
+async fn yolo_mode_still_prompts_for_background_destructive_shell() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2636,7 +2636,7 @@ async fn yolo_mode_prompts_for_background_shell_safety_floor() {
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-bg\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
         "{\"index\":0,\"id\":\"call_bg\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo bg-yolo-marker\\\",\\\"background\\\":true}\"}}",
+        "\"arguments\":\"{\\\"command\\\":\\\"rm -rf ~/\\\",\\\"background\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-bg\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -2770,6 +2770,139 @@ async fn yolo_mode_prompts_for_background_shell_safety_floor() {
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
     assert!(saw_approval_prompt);
+    assert!(saw_tool_result);
+    assert!(saw_complete);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn yolo_mode_does_not_prompt_for_background_shell() {
+    // #3883: the durable-review floor keys on what the command does, not on
+    // "not provably read-only". An ordinary background command in YOLO must
+    // run without a prompt; genuinely destructive and publish-like background
+    // work still holds (see the sibling tests).
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_bgok\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
+        "\"arguments\":\"{\\\"command\\\":\\\"echo bg-yolo-no-prompt\\\",\\\"background\\\":true}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("bg-yolo-no-prompt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "please run a background shell".to_string(),
+            mode: AppMode::Yolo,
+            provider: None,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            show_thinking: true,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send model turn");
+
+    let mut saw_tool_result = false;
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for engine event")
+    {
+        match event {
+            Event::ApprovalRequired { .. } => {
+                panic!("YOLO mode must not prompt for an ordinary background shell command");
+            }
+            Event::ToolCallComplete { name, result, .. } => {
+                if name == "exec_shell" {
+                    saw_tool_result = true;
+                    let result = result.expect("background shell should start");
+                    assert!(result.success, "{result:?}");
+                }
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                saw_complete = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
     assert!(saw_tool_result);
     assert!(saw_complete);
 }
