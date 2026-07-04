@@ -12,6 +12,7 @@ use crate::models::SystemPrompt;
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
 use crate::tui::app::AppMode;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct PromptSessionContext<'a> {
@@ -315,6 +316,68 @@ fn load_handoff_block(workspace: &Path) -> Option<String> {
     ))
 }
 
+/// Load the structured user-global constitution, if present, and render it as
+/// its own model-facing block.
+fn load_user_constitution_block() -> Option<String> {
+    if user_constitution_disabled_by_setup_state() {
+        return None;
+    }
+
+    let path = match codewhale_config::UserConstitution::path() {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(
+                target: "prompts",
+                "could not resolve user-global constitution path: {err:#}"
+            );
+            return None;
+        }
+    };
+
+    match codewhale_config::UserConstitution::load_from(&path) {
+        codewhale_config::UserConstitutionLoad::Loaded(constitution) => {
+            constitution.render_block(None)
+        }
+        codewhale_config::UserConstitutionLoad::Missing
+        | codewhale_config::UserConstitutionLoad::Empty => None,
+        codewhale_config::UserConstitutionLoad::Invalid(err) => {
+            tracing::warn!(
+                target: "prompts",
+                "skipping invalid user-global constitution {}: {err}",
+                path.display()
+            );
+            None
+        }
+        codewhale_config::UserConstitutionLoad::Unreadable(err) => {
+            tracing::warn!(
+                target: "prompts",
+                "skipping unreadable user-global constitution {}: {err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn user_constitution_disabled_by_setup_state() -> bool {
+    match codewhale_config::SetupState::load() {
+        Ok(Some(state)) => matches!(
+            state.constitution_choice,
+            codewhale_config::ConstitutionChoice::Bundled
+                | codewhale_config::ConstitutionChoice::Deferred
+                | codewhale_config::ConstitutionChoice::ExpertOverride
+        ),
+        Ok(None) => false,
+        Err(err) => {
+            tracing::warn!(
+                target: "prompts",
+                "could not resolve setup-state path while loading user constitution: {err:#}"
+            );
+            false
+        }
+    }
+}
+
 // ── Prompt layers loaded at compile time ──────────────────────────────
 
 /// Core: task execution, tool-use rules, output format, toolbox reference,
@@ -349,6 +412,8 @@ static LOCALE_CLOSER_VI_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceL
 static AUTHORITY_RECAP_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
     std::sync::OnceLock::new();
+static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Context passed to an embedder-provided static prompt composer.
 ///
@@ -497,6 +562,19 @@ fn read_prompt_override_file(config_dir: &Path, relative: &str) -> Option<String
     Some(raw)
 }
 
+fn push_prompt_override_notice(message: String) {
+    if let Ok(mut notices) = PROMPT_OVERRIDE_NOTICES.lock() {
+        notices.push(message);
+    }
+}
+
+pub fn take_prompt_override_notices() -> Vec<String> {
+    PROMPT_OVERRIDE_NOTICES
+        .lock()
+        .map(|mut notices| std::mem::take(&mut *notices))
+        .unwrap_or_default()
+}
+
 /// Load user prompt overrides from `config_dir` and install them through the
 /// existing override hooks. Returns the names of the overrides that were
 /// applied (for logging/diagnostics).
@@ -510,15 +588,18 @@ pub fn load_config_dir_prompt_overrides(config_dir: &Path) -> Vec<&'static str> 
         if !base_prompt_override_opt_in() {
             // A file exists but the user hasn't opted in. Don't silently
             // replace the base prompt — surface the gate instead.
-            tracing::warn!(
-                target: "prompts",
-                "found a base-prompt override at {}/{} but {} is not set; \
-                 leaving the bundled Constitution in place. Set {}=1 to opt in.",
+            let warning = format!(
+                "Custom Constitution override found at {}/{} but {} is not set; using the bundled Constitution. Set {}=1 to opt in.",
                 config_dir.display(),
                 CONSTITUTION_OVERRIDE_FILE,
                 BASE_PROMPT_OVERRIDE_OPT_IN_ENV,
                 BASE_PROMPT_OVERRIDE_OPT_IN_ENV,
             );
+            tracing::warn!(
+                target: "prompts",
+                "{warning}",
+            );
+            push_prompt_override_notice(warning);
         } else if set_base_prompt_override(text).is_ok() {
             applied.push("constitution");
         }
@@ -1202,6 +1283,10 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         full_prompt = format!("{preamble}\n\n{full_prompt}");
     }
 
+    if let Some(user_constitution_block) = load_user_constitution_block() {
+        full_prompt = format!("{full_prompt}\n\n{user_constitution_block}");
+    }
+
     if session_context.project_context_pack_enabled
         && let Some(pack) = crate::project_context::generate_project_context_pack(workspace)
     {
@@ -1449,9 +1534,18 @@ mod tests {
         assert!(read_prompt_override_file(tmp.path(), CONSTITUTION_OVERRIDE_FILE).is_some());
         // ...but without the opt-in flag, nothing is applied.
         if std::env::var(BASE_PROMPT_OVERRIDE_OPT_IN_ENV).is_err() {
+            let _ = take_prompt_override_notices();
             assert!(
                 load_config_dir_prompt_overrides(tmp.path()).is_empty(),
                 "override must require the explicit opt-in flag, not just a file"
+            );
+            let notices = take_prompt_override_notices();
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.contains(BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
+                        && notice.contains("using the bundled Constitution")),
+                "gated override should record a visible notice, got {notices:?}"
             );
         }
     }
@@ -2380,6 +2474,147 @@ mod tests {
         assert!(prompt.contains("## Environment"));
         assert!(prompt.contains("- lang: ja"));
         assert!(prompt.contains("- codewhale_version:"));
+    }
+
+    #[test]
+    fn user_global_constitution_block_is_injected_separately() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let codewhale_home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+
+        let constitution = codewhale_config::UserConstitution {
+            about: Some("Maintains CodeWhale release lanes.".to_string()),
+            working_style: vec!["Prefer live verification before claims.".to_string()],
+            priorities: vec!["Keep release gates green.".to_string()],
+            autonomy_preference: codewhale_config::AutonomyPreference::Balanced,
+            ..codewhale_config::UserConstitution::default()
+        };
+        constitution
+            .save_to(
+                &codewhale_home
+                    .join(codewhale_config::user_constitution::USER_CONSTITUTION_FILE_NAME),
+            )
+            .expect("save user constitution");
+
+        let prompt = match system_prompt_for_mode_with_context_skills_and_session(
+            &workspace,
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                project_context_pack_enabled: false,
+                ..PromptSessionContext::default()
+            },
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+
+        let base_at = prompt.find("### VI. Priority").expect("base prompt");
+        let user_block_at = prompt
+            .find("<codewhale_user_constitution")
+            .expect("user constitution block");
+        let env_at = prompt
+            .find("- codewhale_version:")
+            .expect("rendered environment block");
+        assert!(
+            base_at < user_block_at && user_block_at < env_at,
+            "user constitution should be its own layer after the base/project context and before volatile environment data"
+        );
+        assert!(prompt.contains("source=\"user-global\""));
+        assert!(prompt.contains("Maintains CodeWhale release lanes."));
+        assert!(prompt.contains("Prefer live verification before claims."));
+        assert!(
+            !prompt.contains(&codewhale_home.display().to_string()),
+            "prompt should use the stable user-global source label, not a device-specific home path"
+        );
+    }
+
+    #[test]
+    fn bundled_choice_disables_user_global_constitution_block() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let codewhale_home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+
+        let constitution = codewhale_config::UserConstitution {
+            about: Some("This file should stay inactive.".to_string()),
+            ..codewhale_config::UserConstitution::default()
+        };
+        constitution
+            .save_to(
+                &codewhale_home
+                    .join(codewhale_config::user_constitution::USER_CONSTITUTION_FILE_NAME),
+            )
+            .expect("save user constitution");
+
+        let mut state = codewhale_config::SetupState::default();
+        state.complete_constitution_checkpoint(
+            "0.8.67",
+            codewhale_config::ConstitutionChoice::Bundled,
+        );
+        state
+            .save_to(&codewhale_home.join(codewhale_config::setup_state::SETUP_STATE_FILE_NAME))
+            .expect("save setup state");
+
+        let prompt = match system_prompt_for_mode_with_context_skills_and_session(
+            &workspace,
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                project_context_pack_enabled: false,
+                ..PromptSessionContext::default()
+            },
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+
+        assert!(!prompt.contains("<codewhale_user_constitution"));
+        assert!(!prompt.contains("This file should stay inactive."));
+    }
+
+    #[test]
+    fn invalid_user_global_constitution_is_skipped() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let codewhale_home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        std::fs::write(
+            codewhale_home.join(codewhale_config::user_constitution::USER_CONSTITUTION_FILE_NAME),
+            "{ not valid json",
+        )
+        .expect("write invalid user constitution");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+
+        let prompt = match system_prompt_for_mode_with_context_skills_and_session(
+            &workspace,
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                project_context_pack_enabled: false,
+                ..PromptSessionContext::default()
+            },
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+
+        assert!(!prompt.contains("<codewhale_user_constitution"));
     }
 
     #[test]

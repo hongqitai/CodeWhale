@@ -942,7 +942,7 @@ impl AppMode {
     pub fn as_setting(self) -> &'static str {
         match self {
             Self::Agent => "agent",
-            Self::Auto => "auto",
+            Self::Auto => "agent",
             Self::Yolo => "yolo",
             Self::Plan => "plan",
         }
@@ -952,7 +952,7 @@ impl AppMode {
     pub fn label(self) -> &'static str {
         match self {
             AppMode::Agent => "AGENT",
-            AppMode::Auto => "AUTO",
+            AppMode::Auto => "AGENT",
             AppMode::Yolo => "YOLO",
             AppMode::Plan => "PLAN",
         }
@@ -962,7 +962,7 @@ impl AppMode {
     pub fn display_name(self) -> &'static str {
         match self {
             AppMode::Agent => "Agent",
-            AppMode::Auto => "Auto",
+            AppMode::Auto => "Agent",
             AppMode::Yolo => "YOLO",
             AppMode::Plan => "Plan",
         }
@@ -973,7 +973,7 @@ impl AppMode {
         match self {
             AppMode::Agent => '1',
             AppMode::Plan => '2',
-            AppMode::Auto => '3',
+            AppMode::Auto => '1',
             AppMode::Yolo => '4',
         }
     }
@@ -984,8 +984,7 @@ impl AppMode {
         tr(
             locale,
             match self {
-                AppMode::Agent => MessageId::AppModeAgent,
-                AppMode::Auto => MessageId::AppModeAuto,
+                AppMode::Agent | AppMode::Auto => MessageId::AppModeAgent,
                 AppMode::Yolo => MessageId::AppModeYolo,
                 AppMode::Plan => MessageId::AppModePlan,
             },
@@ -998,9 +997,8 @@ impl AppMode {
         tr(
             locale,
             match self {
-                AppMode::Agent => MessageId::AppModeAgentHint,
+                AppMode::Agent | AppMode::Auto => MessageId::AppModeAgentHint,
                 AppMode::Plan => MessageId::AppModePlanHint,
-                AppMode::Auto => MessageId::AppModeAutoHint,
                 AppMode::Yolo => MessageId::AppModeYoloHint,
             },
         )
@@ -1010,8 +1008,7 @@ impl AppMode {
     /// Description shown in help or onboarding text.
     pub fn description(self) -> &'static str {
         match self {
-            AppMode::Agent => "Agent mode - autonomous task execution with tools",
-            AppMode::Auto => "Auto mode - shell enabled with automatic risk review",
+            AppMode::Agent | AppMode::Auto => "Agent mode - autonomous task execution with tools",
             AppMode::Yolo => "YOLO mode - full tool access without approvals",
             AppMode::Plan => "Plan mode - design before implementing",
         }
@@ -1131,7 +1128,7 @@ struct EffectiveModePolicy {
 /// This is the single source of truth for the mode/permission table (#3386):
 /// - `Plan`   → read-only: no shell, no trust, `Suggest` approvals.
 /// - `Agent`  → the user's durable baseline (`prefs`).
-/// - `Auto`   → shell-enabled Agent with automatic risk review, no trust.
+/// - `Auto`   → compatibility alias for Agent; not a separate behavior.
 /// - `Yolo`   → full authority: shell + trust + `Bypass` approvals.
 ///
 /// Pure and side-effect free so it can be unit-tested directly and reused by
@@ -1144,17 +1141,11 @@ fn base_policy_for_mode(mode: AppMode, prefs: &ModeSessionPrefs) -> EffectiveMod
             trust_mode: false,
             approval_mode: ApprovalMode::Suggest,
         },
-        AppMode::Agent => EffectiveModePolicy {
+        AppMode::Agent | AppMode::Auto => EffectiveModePolicy {
             mode,
             allow_shell: prefs.agent_allow_shell,
             trust_mode: prefs.agent_trust_mode,
             approval_mode: prefs.agent_approval_mode,
-        },
-        AppMode::Auto => EffectiveModePolicy {
-            mode,
-            allow_shell: true,
-            trust_mode: false,
-            approval_mode: ApprovalMode::Auto,
         },
         AppMode::Yolo => EffectiveModePolicy {
             mode,
@@ -1226,6 +1217,22 @@ pub struct MentionCompletionCache {
     pub entries: Vec<String>,
 }
 
+/// Cached full candidate walk for @-mention completions. One workspace walk
+/// serves every subsequent keystroke of the same mention token — the
+/// per-keystroke synchronous re-walk was the dominant composer latency on
+/// large repos (#3757). Path-like partials (containing `/` or starting with
+/// `.`) bypass this cache because local path-reference completions are
+/// needle-dependent.
+#[derive(Debug, Clone)]
+pub struct MentionCandidateCache {
+    pub workspace: PathBuf,
+    pub cwd: Option<PathBuf>,
+    pub walk_depth: usize,
+    pub follow_links: bool,
+    pub collected_at: std::time::Instant,
+    pub candidates: Vec<String>,
+}
+
 /// Composer input state — grouped fields for the text input area.
 pub struct ComposerState {
     /// Current composer text content.
@@ -1257,6 +1264,9 @@ pub struct ComposerState {
     /// Cached @-mention completions to avoid re-walking the filesystem when
     /// the cursor moves inside the same mention token.
     pub mention_completion_cache: Option<MentionCompletionCache>,
+    /// Cached full candidate list so successive keystrokes inside one mention
+    /// token filter in memory instead of re-walking the workspace (#3757).
+    pub mention_candidate_cache: Option<MentionCandidateCache>,
     /// Whether vim modal editing is enabled for this composer.
     /// Sourced from `Settings::composer_vim_mode` at startup.
     pub vim_enabled: bool,
@@ -1293,6 +1303,7 @@ impl Default for ComposerState {
             mention_menu_selected: 0,
             mention_menu_hidden: false,
             mention_completion_cache: None,
+            mention_candidate_cache: None,
             vim_enabled: false,
             vim_mode: VimMode::Normal,
             vim_pending_d: false,
@@ -1446,6 +1457,33 @@ pub struct SidebarHoverState {
 
 /// Per-row metadata for sidebar detail popovers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarRowAction {
+    Command(String),
+    ToggleAgentDetails { agent_id: String },
+    CancelAgent { agent_id: String },
+}
+
+impl SidebarRowAction {
+    #[must_use]
+    pub fn as_command(&self) -> Option<&str> {
+        match self {
+            Self::Command(command) => Some(command.as_str()),
+            Self::ToggleAgentDetails { .. } | Self::CancelAgent { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_cancel_action(&self) -> bool {
+        match self {
+            Self::Command(command) => command.contains(" cancel "),
+            Self::CancelAgent { .. } => true,
+            Self::ToggleAgentDetails { .. } => false,
+        }
+    }
+}
+
+/// Per-row metadata for sidebar detail popovers.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarHoverRow {
     /// Absolute row position in the terminal.
     pub row_y: u16,
@@ -1461,9 +1499,9 @@ pub struct SidebarHoverRow {
     /// `shell_*` job ids route through `/jobs` (e.g. `/jobs cancel
     /// shell_abc123`); task-manager ids route through `/task` (e.g.
     /// `/task show task_abc123`).
-    pub click_action: Option<String>,
+    pub click_action: Option<SidebarRowAction>,
     /// Optional narrower stop target for rows that show an inline `[x]`.
-    pub stop_action: Option<String>,
+    pub stop_action: Option<SidebarRowAction>,
     pub stop_zone_start_col: Option<u16>,
     pub stop_zone_end_col: Option<u16>,
 }
@@ -1790,6 +1828,8 @@ pub struct App {
     pub subagent_terminal_seen_at: HashMap<String, Instant>,
     /// Last known per-agent progress text for running sub-agents.
     pub agent_progress: HashMap<String, String>,
+    /// Agent rows expanded by direct sidebar interaction.
+    pub expanded_sidebar_agents: HashSet<String>,
     /// Parent/depth metadata for live progress-only sub-agent rows.
     pub agent_progress_meta: HashMap<String, AgentProgressMeta>,
     /// In-transcript sub-agent card index by `agent_id` (issue #128).
@@ -2003,6 +2043,39 @@ pub struct App {
     /// DeepSeek account balance, refreshed once per turn completion.
     /// Shared cell updated by background fetch tasks; read lock in the UI thread.
     pub balance_cell: std::sync::Arc<std::sync::Mutex<Option<crate::pricing::BalanceInfo>>>,
+    /// Shared cell for async fleet-profile model-draft delivery. A background
+    /// task fills it (model label + drafted profile or a failure reason) so
+    /// the drafting network call never parks the event loop (#3757 review).
+    #[allow(clippy::type_complexity)]
+    /// Monotonic generation for model-draft requests. Bumped on each draft
+    /// request and each setup/fleet wizard open, so a draft that lands after
+    /// a superseding request or a wizard reopen is dropped rather than
+    /// installed into the wrong (or a stale) wizard instance.
+    pub draft_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[allow(clippy::type_complexity)]
+    pub fleet_draft_cell: std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                u64,
+                String,
+                Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
+            )>,
+        >,
+    >,
+    /// Shared cell for async constitution model-draft delivery (same pattern
+    /// as `fleet_draft_cell`, so the drafting network call never parks the
+    /// event loop).
+    #[allow(clippy::type_complexity)]
+    pub constitution_draft_cell: std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                u64,
+                String,
+                crate::localization::Locale,
+                Result<Box<codewhale_config::UserConstitution>, String>,
+            )>,
+        >,
+    >,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -2149,7 +2222,7 @@ pub struct ToolDetailRecord {
 }
 
 /// Lightweight task view for sidebar rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPanelEntry {
     pub id: String,
     pub status: String,
@@ -2228,6 +2301,21 @@ fn default_composer_arrows_scroll_for_platform(use_mouse_capture: bool, _is_wind
 }
 
 impl App {
+    /// Advance and return the model-draft generation. Call when a draft is
+    /// requested or a setup/fleet wizard opens; a spawned draft that captured
+    /// an older generation is dropped on delivery.
+    pub fn next_draft_gen(&self) -> u64 {
+        self.draft_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// The current model-draft generation (delivery compares against this).
+    #[must_use]
+    pub fn current_draft_gen(&self) -> u64 {
+        self.draft_gen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Cap on the session turn-cache history. Holds enough turns to debug a long
     /// session without being so large the on-screen `/cache` table wraps.
     pub const TURN_CACHE_HISTORY_CAP: usize = 50;
@@ -2487,25 +2575,27 @@ impl App {
             needs_workspace_trust,
         );
 
-        // Durable Agent-era permission baseline (#3386). Plan/Auto/YOLO derive
-        // from and restore to this. When the user starts in Auto or YOLO the
-        // live shell flag is force-enabled below, so the baseline shell value is
-        // taken from the interactive default (the pre-mode Agent surface) rather
-        // than the YOLO-forced live mirror; otherwise it mirrors the resolved
-        // `allow_shell` option, which already carries that same interactive
-        // default. Using `interactive_allow_shell()` here keeps the Agent
-        // baseline identical regardless of launch mode, so a YOLO/Auto -> Agent
-        // downshift exposes shell (approval-gated) exactly as documented, while
-        // an explicit `allow_shell = false` still hides it. Trust is never part
-        // of the Agent baseline (it is YOLO-only authority). Approval mirrors the
-        // configured policy.
+        // Durable Agent-era permission baseline (#3386). Plan/YOLO derive from
+        // and restore to this. Legacy Auto inputs parse to Agent; if an older
+        // caller still constructs `AppMode::Auto` directly, it projects through
+        // the Agent baseline instead of enabling a fourth runtime posture. When
+        // the user starts in YOLO the live shell flag is force-enabled below, so
+        // the baseline shell value is taken from the interactive default (the
+        // pre-mode Agent surface) rather than the YOLO-forced live mirror;
+        // otherwise it mirrors the resolved `allow_shell` option, which already
+        // carries that same interactive default. Using `interactive_allow_shell()`
+        // here keeps the Agent baseline identical regardless of launch mode, so
+        // a YOLO -> Agent downshift exposes shell (approval-gated) exactly as
+        // documented, while an explicit `allow_shell = false` still hides it.
+        // Trust is never part of the Agent baseline (it is YOLO-only authority).
+        // Approval mirrors the configured policy.
         let configured_approval_mode = config
             .approval_policy
             .as_deref()
             .and_then(ApprovalMode::from_config_value)
             .unwrap_or_default();
         let mode_prefs = ModeSessionPrefs {
-            agent_allow_shell: if matches!(initial_mode, AppMode::Auto | AppMode::Yolo) {
+            agent_allow_shell: if matches!(initial_mode, AppMode::Yolo) {
                 config.interactive_allow_shell()
             } else {
                 allow_shell
@@ -2513,7 +2603,7 @@ impl App {
             agent_trust_mode: false,
             agent_approval_mode: configured_approval_mode,
         };
-        let allow_shell = allow_shell || matches!(initial_mode, AppMode::Auto | AppMode::Yolo);
+        let allow_shell = allow_shell || matches!(initial_mode, AppMode::Yolo);
         let shell_manager = new_shared_shell_manager(workspace.clone());
 
         // Initialize hooks executor from config, merged with project-local
@@ -2551,9 +2641,15 @@ impl App {
             crate::mcp::load_config_with_workspace(&mcp_config_path, &workspace)
                 .map(|cfg| cfg.servers.len())
                 .unwrap_or(0);
+        let hotbar_actions = HotbarActionRegistry::with_configured_routes(
+            config,
+            provider,
+            &model,
+            &provider_models,
+        );
         Self {
             mode: initial_mode,
-            hotbar_actions: HotbarActionRegistry::with_builtins(),
+            hotbar_actions,
             composer: ComposerState {
                 input: initial_input_text,
                 cursor_position: initial_input_cursor,
@@ -2573,6 +2669,7 @@ impl App {
                 mention_menu_selected: 0,
                 mention_menu_hidden: false,
                 mention_completion_cache: None,
+                mention_candidate_cache: None,
                 vim_enabled: composer_vim_enabled,
                 vim_mode: VimMode::Normal,
                 vim_pending_d: false,
@@ -2681,6 +2778,7 @@ impl App {
             subagent_cache: Vec::new(),
             subagent_terminal_seen_at: HashMap::new(),
             agent_progress: HashMap::new(),
+            expanded_sidebar_agents: HashSet::new(),
             agent_progress_meta: HashMap::new(),
             subagent_card_index: HashMap::new(),
             last_fanout_card_index: None,
@@ -2705,8 +2803,6 @@ impl App {
             approval_session_denied: HashSet::new(),
             approval_mode: if matches!(initial_mode, AppMode::Yolo) {
                 ApprovalMode::Bypass
-            } else if matches!(initial_mode, AppMode::Auto) {
-                ApprovalMode::Auto
             } else {
                 config
                     .approval_policy
@@ -2776,6 +2872,9 @@ impl App {
             turn_last_activity_at: None,
             cumulative_turn_duration: std::time::Duration::ZERO,
             balance_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            draft_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            constitution_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,
@@ -2868,21 +2967,21 @@ impl App {
         }
     }
 
-    pub fn finish_onboarding(&mut self) {
+    pub fn finish_onboarding_without_feature_intro(&mut self) {
         self.onboarding = OnboardingState::None;
         if let Err(err) = crate::tui::onboarding::mark_onboarded() {
             self.status_message = Some(format!("Failed to mark onboarding: {err}"));
         }
         self.needs_redraw = true;
-        self.maybe_show_feature_intro();
     }
 
-    /// Show the one-time Fleet + Hotbar introduction nudge. Idempotent and
+    /// Show the one-time first-run follow-up nudge. Idempotent and
     /// gated by a persisted `Settings::feature_intro_shown` flag, so it appears
-    /// exactly once per install: at the end of first-run onboarding (called from
-    /// [`Self::finish_onboarding`]) and on the next launch for returning users
-    /// who haven't seen it (called from `run_tui` after `App::new`). Plain copy,
-    /// no marketing language. Stays silent while onboarding is still in progress.
+    /// exactly once per install: after first-run setup handoff when no
+    /// constitution checkpoint is due, and on the next launch for returning
+    /// users who haven't seen it (called from `run_tui` after `App::new`).
+    /// Plain copy, no marketing language. Stays silent while onboarding is
+    /// still in progress.
     pub fn maybe_show_feature_intro(&mut self) {
         if self.onboarding != OnboardingState::None {
             return;
@@ -2902,13 +3001,15 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// The one-time Fleet + Hotbar introduction copy. Plain language, no
+    /// The one-time first-run follow-up copy. Plain language, no
     /// marketing. Pure so it can be unit-tested without touching disk or env.
     pub(crate) fn feature_intro_content() -> String {
-        let alt = crate::tui::widgets::key_hint::alt_prefix();
-        format!(
-            "A couple of things you can set up any time:\n\n• Hotbar — {alt}1-8 shortcuts for common actions. Run `/hotbar` to customize, or `/hotbar off` to hide it.\n• Fleet — a durable team of sub-agents for parallel work. Run `/fleet setup` to configure a loadout.\n\nThis tip won't show again."
-        )
+        "Your CodeWhale setup is ready.\n\n\
+         • Constitution — review or personalize standing guidance with `/constitution`; run `/setup` for the full checkpoint any time.\n\
+         • Provider and model — adjust the active route later with `/provider` or `/model`.\n\
+         • Optional later — use `/hotbar` for Hotbar shortcuts (`/hotbar off` hides it) and `/fleet setup` for Fleet loadouts.\n\n\
+         This tip won't show again."
+            .to_string()
     }
 
     /// Apply a locale tag selected from the onboarding language picker (#566).
@@ -3217,7 +3318,11 @@ impl App {
     /// is unknown or there were no cache hits.
     pub fn last_turn_cache_savings(&self) -> Option<f64> {
         let hit_tokens = self.session.last_prompt_cache_hit_tokens?;
-        let estimate = crate::pricing::calculate_cache_savings(&self.model, hit_tokens)?;
+        let estimate = crate::pricing::calculate_cache_savings_for_provider(
+            self.api_provider,
+            &self.model,
+            hit_tokens,
+        )?;
         Some(match self.cost_currency {
             crate::pricing::CostCurrency::Usd => estimate.usd,
             crate::pricing::CostCurrency::Cny if estimate.cny == 0.0 && estimate.usd > 0.0 => {
@@ -3957,16 +4062,29 @@ impl App {
         {
             return (StatusToastLevel::Error, Some(15_000), true);
         }
-        if has("saved")
-            || has("loaded")
-            || has("queued")
-            || has("found")
-            || has("enabled")
-            || has("completed")
+        // A success keyword under a negation ("not saved", "no longer
+        // found", "could not enable") is a failure the coarse keyword match
+        // would otherwise paint green. Guard it: negated success degrades to
+        // a neutral Info toast rather than a misleading Success.
+        let negated = has("not ")
+            || has("no longer")
+            || has("no ")
+            || has("could not")
+            || has("couldn't")
+            || has("cannot")
+            || has("can't")
+            || has("unable");
+        if !negated
+            && (has("saved")
+                || has("loaded")
+                || has("queued")
+                || has("found")
+                || has("enabled")
+                || has("completed"))
         {
             return (StatusToastLevel::Success, Some(5_000), false);
         }
-        if has("cancelled") || has("warning") {
+        if has("cancelled") || has("canceled") || has("warning") {
             return (StatusToastLevel::Warning, Some(5_000), false);
         }
         (StatusToastLevel::Info, Some(4_000), false)
@@ -5923,6 +6041,14 @@ pub enum AppAction {
     OpenFleetSetup,
     /// Open the `/hotbar` setup wizard.
     OpenHotbarSetup,
+    /// Open the constitution-first `/setup` wizard shell.
+    OpenSetupWizard,
+    /// Open the constitution-first `/setup` wizard at a specific step.
+    OpenSetupWizardAt {
+        step: codewhale_config::SetupStep,
+    },
+    /// Record that the bundled/default constitution should be used.
+    UseBundledConstitution,
     /// Disable the Hotbar: persist `hotbar = []` and clear the live slots.
     DisableHotbar,
     /// Restore the default recommended Hotbar slots: remove the `hotbar` key so
@@ -5935,6 +6061,10 @@ pub enum AppAction {
     },
     /// Send a message to the AI (normal chat mode).
     SendMessage(String),
+    /// Cancel a running sub-agent through the engine manager.
+    CancelSubAgent {
+        agent_id: String,
+    },
     /// Update the runtime goal status (`/goal pause|resume|clear|…`) without
     /// dispatching a model turn. The UI layer translates this into
     /// `Op::SetGoalStatus`.
@@ -5952,6 +6082,12 @@ pub enum AppAction {
     SwitchProvider {
         provider: ApiProvider,
         model: Option<String>,
+    },
+    /// Switch provider+model through the same apply path as a `/model` route
+    /// row. Used by Hotbar route slots so dispatch does not hand-mutate config.
+    SwitchModelRoute {
+        provider: ApiProvider,
+        model: String,
     },
     UpdateCompaction(CompactionConfig),
     UpdateStreamChunkTimeout(u64),

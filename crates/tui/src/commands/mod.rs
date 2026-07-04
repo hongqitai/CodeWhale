@@ -181,6 +181,9 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         "deepseek" => CommandResult::error(
             "The /deepseek command was renamed. Use /links (aliases: /dashboard, /api).",
         ),
+        "doctor" => CommandResult::error(
+            "The /doctor command is a CLI diagnostic. Run `codewhale doctor` or `codewhale doctor --json`; use `/setup` in the TUI for readiness and verification.",
+        ),
 
         _ => {
             // Third source: skills (lowest precedence after native and user-config).
@@ -747,6 +750,25 @@ mod tests {
                     !alias.chars().any(|ch| ch.is_ascii_uppercase()),
                     "/{} alias /{alias} must not contain uppercase ASCII",
                     command.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_discovery_tier_lists_use_canonical_registered_names() {
+        for (tier_name, names) in [
+            ("advanced", traits::ADVANCED_DISCOVERY_COMMANDS),
+            ("compatibility", traits::COMPATIBILITY_DISCOVERY_COMMANDS),
+        ] {
+            for &name in names {
+                let info = registry()
+                    .get_info(name)
+                    .unwrap_or_else(|| panic!("{tier_name} discovery entry {name:?} must resolve"));
+                assert_eq!(
+                    info.name, name,
+                    "{tier_name} discovery entry {name:?} must be canonical, not an alias for /{}",
+                    info.name
                 );
             }
         }

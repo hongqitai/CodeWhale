@@ -28,23 +28,24 @@ use crate::client::DeepSeekClient;
 use crate::config::MAX_SUBAGENTS;
 use crate::core::events::Event;
 use crate::dependencies::{ExternalTool, Git};
-use crate::llm_client::LlmClient;
+use crate::llm_client::{LlmClient, LlmError};
 use crate::models::{
     ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Tool, Usage,
 };
 use crate::request_tuning::RequestTuning;
 use crate::tools::handle::VarHandle;
 use crate::tools::plan::{PlanState, SharedPlanState};
-use crate::tools::registry::{ToolRegistry, ToolRegistryBuilder};
+use crate::tools::registry::{AgentToolSurfaceOptions, ToolRegistry, ToolRegistryBuilder};
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
 use crate::tools::todo::SharedTodoList;
 #[cfg(test)]
 use crate::tools::todo::TodoList;
+use crate::tools::truncate::{SPILLOVER_HEAD_BYTES, SPILLOVER_THRESHOLD_BYTES, maybe_spillover};
 use crate::tui::app::ReasoningEffort;
 use crate::utils::spawn_supervised;
-use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
+use crate::worker_profile::{ModelRoute, ShellPolicy, ToolScope, WorkerRuntimeProfile};
 
 pub mod mailbox;
 #[allow(unused_imports)]
@@ -116,6 +117,20 @@ const DEFAULT_STEP_API_TIMEOUT: Duration =
 const COMPLETED_AGENT_RETENTION: Duration = Duration::from_secs(60 * 60);
 const MAX_AGENT_WORKER_RECORDS: usize = 256;
 const MAX_AGENT_WORKER_EVENTS_PER_RECORD: usize = 128;
+/// Byte budget for the message tail retained in a [`SubAgentCheckpoint`]
+/// (#3882). Checkpoints fire on every step of every worker and are cloned
+/// into snapshots, projections, and `subagents.v1.json`; an unbounded
+/// `messages` clone turns one large tool output into many resident copies
+/// under Fleet fanout. The checkpoint keeps the most recent messages within
+/// this budget (always at least the last one, so continuability is
+/// preserved) and records how many older messages were omitted. Full tool
+/// outputs remain recoverable from the spillover files on disk.
+const SUBAGENT_CHECKPOINT_MESSAGE_BUDGET_BYTES: usize = 256 * 1024;
+/// Byte budget for the message tail embedded in a `subagent_full_transcript`
+/// handle (#3882). One handle is retained in memory per agent; the payload
+/// keeps a bounded tail plus the true `message_count` so inspection stays
+/// useful without pinning a whole unbounded transcript in RAM.
+const SUBAGENT_TRANSCRIPT_MESSAGE_BUDGET_BYTES: usize = 1024 * 1024;
 const SUBAGENT_STATE_SCHEMA_VERSION: u32 = 1;
 const SUBAGENT_STATE_FILE: &str = "subagents.v1.json";
 const SUBAGENT_WORKTREE_ROOT_DIR: &str = ".codewhale-worktrees";
@@ -1278,6 +1293,13 @@ struct AgentUsageBudgetScope {
 }
 
 /// Durable recovery point for an interrupted sub-agent session.
+///
+/// `messages` is a byte-bounded tail (#3882), not the full history:
+/// checkpoints fire per step and are cloned into snapshots/persistence, so an
+/// unbounded clone multiplies large tool outputs under Fleet fanout.
+/// `message_count` records the true total and `omitted_messages` how many of
+/// the oldest were dropped from this snapshot; spilled tool outputs remain on
+/// disk under the spillover directory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubAgentCheckpoint {
     pub checkpoint_id: String,
@@ -1290,6 +1312,15 @@ pub struct SubAgentCheckpoint {
     pub created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
+    /// Oldest messages omitted from `messages` to honor the checkpoint byte
+    /// budget. `0` for records written before v0.8.67 (serde default).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_messages: usize,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1355,6 +1386,21 @@ impl Default for PersistedSubAgentState {
 /// [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`].
 pub const DEFAULT_MAX_SPAWN_DEPTH: u32 = codewhale_config::DEFAULT_SPAWN_DEPTH;
 
+/// Resolve a child runtime's `max_spawn_depth` from its (already-incremented)
+/// `spawn_depth` and the model-supplied per-call `max_depth`, clamped to the
+/// absolute [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`].
+///
+/// Without the absolute clamp, `max_spawn_depth = spawn_depth + max_depth`
+/// makes the recursion gate (`spawn_depth + 1 > max_spawn_depth`) reduce to
+/// `1 > max_depth` at every level — always false when the model re-supplies
+/// `max_depth >= 1` per spawn — so ring depth would grow to the global
+/// admission cap instead of the intended 8-ring ceiling.
+fn clamp_child_max_spawn_depth(child_spawn_depth: u32, requested_max_depth: u32) -> u32 {
+    child_spawn_depth
+        .saturating_add(requested_max_depth)
+        .min(codewhale_config::MAX_SPAWN_DEPTH_CEILING)
+}
+
 /// Terminal-state notification emitted to the immediate parent's completion
 /// inbox when one of its children finishes (issue #756). For root-spawned
 /// agents that inbox is the engine turn loop; for nested agents it is a
@@ -1400,6 +1446,10 @@ pub struct SubAgentRuntime {
     pub role_models: HashMap<String, String>,
     pub context: ToolContext,
     pub allow_shell: bool,
+    /// Native Agent-mode tool surface inherited from the parent turn. Carries
+    /// feature/config-dependent families such as web search, patch, memory,
+    /// vision, notify, and FIM so child catalogs stay in parity with the parent.
+    pub agent_tool_surface_options: AgentToolSurfaceOptions,
     /// Capability contract inherited by descendants. `agent` derives a
     /// child profile from this before registering the worker record so parent,
     /// sub-agent, and fleet projections share one worker contract.
@@ -1484,6 +1534,9 @@ impl SubAgentRuntime {
             role_models: HashMap::new(),
             context,
             allow_shell,
+            agent_tool_surface_options: AgentToolSurfaceOptions::new(
+                ShellPolicy::from_legacy_allow_shell(allow_shell),
+            ),
             worker_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
             event_tx,
             manager,
@@ -1511,6 +1564,14 @@ impl SubAgentRuntime {
         self
     }
 
+    /// Preserve the parent Agent-mode native tool surface for child registries.
+    #[must_use]
+    pub fn with_agent_tool_surface_options(mut self, options: AgentToolSurfaceOptions) -> Self {
+        self.speech_output_dir = options.speech_output_dir.clone();
+        self.agent_tool_surface_options = options;
+        self
+    }
+
     /// Attach an MCP pool so the subagent can execute MCP tools.
     #[must_use]
     pub fn with_mcp_pool(
@@ -1534,7 +1595,8 @@ impl SubAgentRuntime {
     /// Preserve the configured speech output directory for sub-agent tools.
     #[must_use]
     pub fn with_speech_output_dir(mut self, output_dir: Option<PathBuf>) -> Self {
-        self.speech_output_dir = output_dir;
+        self.speech_output_dir = output_dir.clone();
+        self.agent_tool_surface_options.speech_output_dir = output_dir;
         self
     }
 
@@ -1649,6 +1711,7 @@ impl SubAgentRuntime {
             role_models: self.role_models.clone(),
             context: child_context,
             allow_shell: self.allow_shell,
+            agent_tool_surface_options: self.agent_tool_surface_options.clone(),
             worker_profile: self.worker_profile.clone(),
             event_tx: self.event_tx.clone(),
             manager: self.manager.clone(),
@@ -2077,9 +2140,29 @@ impl SubAgentManager {
             return Ok(());
         };
         let path = checked_subagent_state_path(&self.workspace, path)?;
-        if !path.exists() {
-            return Ok(());
-        }
+
+        // If canonical path doesn't exist, try legacy .deepseek/ path for one-time
+        // migration. The next persist will write to the canonical .codewhale/ path.
+        let path = if path.exists() {
+            path
+        } else {
+            let legacy = checked_subagent_state_path(
+                &self.workspace,
+                &Path::new(".deepseek")
+                    .join("state")
+                    .join(SUBAGENT_STATE_FILE),
+            )?;
+            if legacy.exists() {
+                tracing::info!(
+                    target: "subagent",
+                    "loading sub-agent state from legacy path for migration: {}",
+                    legacy.display()
+                );
+                legacy
+            } else {
+                return Ok(());
+            }
+        };
 
         let raw = read_subagent_state_file(&self.workspace, &path)?;
         let state = serde_json::from_str::<PersistedSubAgentState>(&raw)?;
@@ -3232,19 +3315,12 @@ async fn subagent_session_projection(
 
 fn default_state_path(workspace: &Path) -> Result<PathBuf> {
     let workspace = normalize_subagent_workspace(workspace);
-    // Prefer .codewhale, fall back to .deepseek for project-local state
-    let primary = checked_subagent_state_path(
-        &workspace,
-        &Path::new(".codewhale")
-            .join("state")
-            .join(SUBAGENT_STATE_FILE),
-    )?;
-    if primary.exists() {
-        return Ok(primary);
-    }
+    // Canonical post-rebrand state path. On first run the file won't exist yet;
+    // write_json_atomic creates parent directories. Legacy .deepseek/state/ data
+    // is migrated on load (see load_state).
     checked_subagent_state_path(
         &workspace,
-        &Path::new(".deepseek")
+        &Path::new(".codewhale")
             .join("state")
             .join(SUBAGENT_STATE_FILE),
     )
@@ -3382,6 +3458,14 @@ fn instant_from_duration(duration: Duration) -> Instant {
         .unwrap_or_else(Instant::now)
 }
 
+/// Per-write sequence so each `write_json_atomic` uses a distinct temp file.
+/// `persist_state_best_effort` fires a fresh thread per call, so multiple
+/// persists of the same `state.json` can be in flight at once; keying the temp
+/// name only on the pid (as before) made every thread write the *same*
+/// `state.<pid>.tmp` and a rename could publish a half-written file — corrupt
+/// state that fails to parse on reload.
+static WRITE_JSON_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_json_atomic<T: Serialize>(workspace: &Path, path: &Path, value: &T) -> Result<()> {
     let workspace = normalize_subagent_workspace(workspace);
     reject_workspace_relative_symlinks(&workspace, path)?;
@@ -3389,10 +3473,15 @@ fn write_json_atomic<T: Serialize>(workspace: &Path, path: &Path, value: &T) -> 
         fs::create_dir_all(parent)?;
     }
     let payload = serde_json::to_string_pretty(value)?;
-    let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
+    let seq = WRITE_JSON_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("{}.{seq}.tmp", std::process::id()));
     reject_workspace_relative_symlinks(&workspace, &tmp_path)?;
     fs::write(&tmp_path, payload)?;
-    fs::rename(tmp_path, path)?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        // Don't leave a stray temp behind if the publish failed.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -3793,7 +3882,8 @@ async fn spawn_subagent_from_input(
 
     let mut child_runtime = runtime.background_runtime();
     if let Some(max_depth) = spawn_request.max_depth {
-        child_runtime.max_spawn_depth = child_runtime.spawn_depth.saturating_add(max_depth);
+        child_runtime.max_spawn_depth =
+            clamp_child_max_spawn_depth(child_runtime.spawn_depth, max_depth);
     }
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace;
@@ -4065,7 +4155,11 @@ async fn run_subagent_task(task: SubAgentTask) {
             (summary, sentinel)
         }
         Err(err) => {
-            let annotated = annotate_child_model_error(&err.to_string(), &model_id);
+            crate::logging::warn(format!(
+                "sub-agent {} model request failed: {err:#}",
+                task.agent_id
+            ));
+            let annotated = annotate_child_model_error(&subagent_failure_message(err), &model_id);
             (
                 format!("Failed: {annotated}"),
                 subagent_failed_sentinel(&task.agent_id, &annotated),
@@ -4081,7 +4175,7 @@ async fn run_subagent_task(task: SubAgentTask) {
             },
             Err(err) => MailboxMessage::Failed {
                 agent_id: task.agent_id.clone(),
-                error: annotate_child_model_error(&err.to_string(), &model_id),
+                error: annotate_child_model_error(&subagent_failure_message(err), &model_id),
             },
         };
         let _ = mb.send(envelope);
@@ -4103,7 +4197,7 @@ async fn run_subagent_task(task: SubAgentTask) {
         Err(err) => {
             manager.update_failed(
                 &agent_id,
-                annotate_child_model_error(&err.to_string(), &model_id),
+                annotate_child_model_error(&subagent_failure_message(err), &model_id),
             );
         }
     }
@@ -4302,6 +4396,18 @@ async fn insert_subagent_full_transcript_handle(
     duration_ms: u64,
     fork_context: bool,
 ) -> VarHandle {
+    // Byte-bound the retained transcript (#3882): the handle store keeps this
+    // payload resident per agent, and the checkpoint already carries its own
+    // bounded message tail — embedding it verbatim would duplicate that tail
+    // inside one payload. Keep checkpoint metadata, drop its messages, and
+    // record how much of the true history the bounded tail omits.
+    let (bounded_messages, omitted_messages) =
+        bounded_tail_messages(messages, SUBAGENT_TRANSCRIPT_MESSAGE_BUDGET_BYTES);
+    let checkpoint_meta = checkpoint.map(|checkpoint| SubAgentCheckpoint {
+        omitted_messages: checkpoint.message_count,
+        messages: Vec::new(),
+        ..checkpoint.clone()
+    });
     let payload = json!({
         "kind": "subagent_full_transcript",
         "agent_id": agent_id,
@@ -4313,11 +4419,94 @@ async fn insert_subagent_full_transcript_handle(
         "steps_taken": steps_taken,
         "duration_ms": duration_ms,
         "assignment": assignment,
-        "checkpoint": checkpoint,
-        "messages": messages,
+        "checkpoint": checkpoint_meta,
+        "message_count": messages.len(),
+        "omitted_messages": omitted_messages,
+        "messages": bounded_messages,
     });
     let mut store = runtime.context.runtime.handle_store.lock().await;
     store.insert_json(format!("agent:{agent_id}"), "full_transcript", payload)
+}
+
+/// Bound a sub-agent tool result before it enters `messages` (#3882).
+///
+/// The root engine applies spillover in `turn_loop.rs`; the sub-agent loop
+/// bypassed it, so one multi-MB build log became many resident copies across
+/// child messages, checkpoints, transcript handles, and persistence — the
+/// Fleet fanout memory blow-up. Over-threshold content (successes AND
+/// errors: sub-agent error output is routinely a full build log, so the root
+/// loop's pass-errors-through rationale does not hold here) is written to the
+/// shared spillover directory and replaced inline by a bounded head plus a
+/// footer naming the on-disk path.
+///
+/// Returns the (possibly bounded) content and the spillover path when one was
+/// written. Spillover write failures degrade to passing the original content
+/// through, mirroring `apply_spillover`.
+fn bound_subagent_tool_result(
+    agent_id: &str,
+    tool_id: &str,
+    content: String,
+) -> (String, Option<PathBuf>) {
+    if content.len() <= SPILLOVER_THRESHOLD_BYTES {
+        return (content, None);
+    }
+    let spill_id = format!("sa_{agent_id}_{tool_id}");
+    match maybe_spillover(
+        &spill_id,
+        &content,
+        SPILLOVER_THRESHOLD_BYTES,
+        SPILLOVER_HEAD_BYTES,
+    ) {
+        Ok(Some((head, path))) => {
+            let footer = format!(
+                "\n\n[Sub-agent tool output truncated: {head_kib} KiB of {total_kib} KiB shown. \
+                 Full output saved to {path}. Use `read_file` on that path if you need the \
+                 elided output.]",
+                head_kib = head.len() / 1024,
+                total_kib = content.len() / 1024,
+                path = path.display(),
+            );
+            (format!("{head}{footer}"), Some(path))
+        }
+        Ok(None) => (content, None),
+        Err(err) => {
+            tracing::warn!(
+                target: "subagent",
+                ?err,
+                agent_id,
+                tool_id,
+                "sub-agent spillover write failed; passing original content through"
+            );
+            (content, None)
+        }
+    }
+}
+
+/// Rough serialized size of one message, used for checkpoint/transcript byte
+/// budgets. Exact JSON size via serde; unserializable messages (should not
+/// happen) count as 1 KiB so they still consume budget.
+fn approximate_message_bytes(message: &Message) -> usize {
+    serde_json::to_string(message).map_or(1024, |s| s.len())
+}
+
+/// Keep the most recent messages whose combined approximate size fits
+/// `budget_bytes`. Always keeps at least the final message (even if it alone
+/// exceeds the budget) so a non-empty history stays continuable. Returns the
+/// retained tail and how many older messages were omitted.
+fn bounded_tail_messages(messages: &[Message], budget_bytes: usize) -> (Vec<Message>, usize) {
+    let mut kept_rev: Vec<Message> = Vec::new();
+    let mut used = 0usize;
+    for message in messages.iter().rev() {
+        let size = approximate_message_bytes(message);
+        if !kept_rev.is_empty() && used.saturating_add(size) > budget_bytes {
+            break;
+        }
+        used = used.saturating_add(size);
+        kept_rev.push(message.clone());
+    }
+    kept_rev.reverse();
+    let omitted = messages.len().saturating_sub(kept_rev.len());
+    (kept_rev, omitted)
 }
 
 fn build_subagent_checkpoint(
@@ -4329,6 +4518,8 @@ fn build_subagent_checkpoint(
 ) -> SubAgentCheckpoint {
     let created_at_ms = epoch_millis_now();
     let checkpoint_id = format!("{agent_id}:step:{steps_taken}:ts:{created_at_ms}");
+    let (bounded_messages, omitted_messages) =
+        bounded_tail_messages(messages, SUBAGENT_CHECKPOINT_MESSAGE_BUDGET_BYTES);
     SubAgentCheckpoint {
         checkpoint_id: checkpoint_id.clone(),
         agent_id: agent_id.to_string(),
@@ -4338,7 +4529,8 @@ fn build_subagent_checkpoint(
         steps_taken,
         message_count: messages.len(),
         created_at_ms,
-        messages: messages.to_vec(),
+        messages: bounded_messages,
+        omitted_messages,
     }
 }
 
@@ -4386,6 +4578,10 @@ fn subagent_transient_provider_retry_delay(retry_number: u32) -> Duration {
 }
 
 fn is_transient_subagent_provider_error(error: &anyhow::Error) -> bool {
+    if let Some(LlmError::RateLimited { .. }) = error.downcast_ref::<LlmError>() {
+        return true;
+    }
+
     let message = format!("{error:#}").to_ascii_lowercase();
     [
         "did not receive response headers",
@@ -4401,6 +4597,11 @@ fn is_transient_subagent_provider_error(error: &anyhow::Error) -> bool {
         "bad gateway",
         "gateway timeout",
         "service unavailable",
+        "rate limited",
+        "rate_limit",
+        "rate_limited",
+        "too many requests",
+        "429",
         "502",
         "503",
         "504",
@@ -5113,6 +5314,18 @@ async fn run_subagent(
                 Err(_) => format!("Error: Tool {tool_name} timed out"),
             };
             let tool_ok = !result.starts_with("Error:");
+            let (result, spilled_to) = bound_subagent_tool_result(&agent_id, &tool_id, result);
+            if let Some(path) = spilled_to.as_ref() {
+                record_agent_progress(
+                    runtime,
+                    &agent_id,
+                    format!(
+                        "{}: tool '{tool_display_name}' output spilled to {}",
+                        format_step_counter(steps, max_steps),
+                        path.display()
+                    ),
+                );
+            }
             record_agent_progress(
                 runtime,
                 &agent_id,
@@ -6331,6 +6544,10 @@ struct SubAgentToolRegistry {
     /// decide whether `Suggest`-level tools (write/edit/patch) may run inside
     /// the child without the parent runtime being auto-approved (#1828, #1833).
     agent_type: SubAgentType,
+    /// Already-derived capability envelope for this child. This captures the
+    /// parent posture intersection, so a Plan parent can expose delegation
+    /// without accidentally granting write or shell tools to the child.
+    runtime_profile: WorkerRuntimeProfile,
     can_spawn_child: bool,
     owner_agent_id: String,
     owner_agent_name: String,
@@ -6372,12 +6589,14 @@ impl SubAgentToolRegistry {
         // retained only when depth budget remains.
         let can_spawn_child = !runtime.would_exceed_depth();
         let context = runtime.context.clone();
-        let mut registry = ToolRegistryBuilder::new().with_full_agent_surface(
+        let mut surface_options = runtime.agent_tool_surface_options.clone();
+        surface_options.shell_policy = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
+        let mut registry = ToolRegistryBuilder::new().with_full_agent_surface_options(
             Some(runtime.client.clone()),
             runtime.model.clone(),
             runtime.manager.clone(),
             runtime.clone(),
-            runtime.allow_shell,
+            surface_options,
             todo_list,
             plan_state,
         );
@@ -6392,6 +6611,7 @@ impl SubAgentToolRegistry {
             allowed_tools: explicit_allowed_tools,
             auto_approve: runtime.context.auto_approve,
             agent_type,
+            runtime_profile: runtime.worker_profile,
             can_spawn_child,
             owner_agent_id,
             owner_agent_name,
@@ -6422,7 +6642,17 @@ impl SubAgentToolRegistry {
             return true;
         }
         match self.registry.get(name) {
-            Some(spec) => role_posture_permits(&self.agent_type, spec.approval_requirement()),
+            Some(spec) => match spec.approval_requirement() {
+                ApprovalRequirement::Auto => true,
+                ApprovalRequirement::Suggest => {
+                    self.runtime_profile.permissions.write
+                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Suggest)
+                }
+                ApprovalRequirement::Required => {
+                    matches!(self.runtime_profile.shell, ShellPolicy::Full)
+                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
+                }
+            },
             None => true,
         }
     }
@@ -6500,7 +6730,9 @@ impl SubAgentToolRegistry {
                     // (#1828, #1833). Read-only roles still bounce so
                     // exploration/review/planning/verifier children
                     // can't mutate the workspace behind the parent's back.
-                    if !Self::role_can_delegate_writes(&self.agent_type) {
+                    if !self.runtime_profile.permissions.write
+                        || !Self::role_can_delegate_writes(&self.agent_type)
+                    {
                         return Err(anyhow!(
                             "Tool {name} requires approval and is not delegated to {role} sub-agents; rerun the parent with auto approval or pick a write-capable role",
                             role = self.agent_type.as_str()
@@ -6588,6 +6820,34 @@ fn build_allowed_tools(
     // registry execution guard still blocks approval-gated tools unless the
     // parent runtime is auto-approved.
     Ok(None)
+}
+
+/// Render a sub-agent model failure with its full error chain. `to_string()`
+/// on an anyhow error prints only the outermost context (for Codex children
+/// that is the bare "Responses API request failed"), discarding the HTTP
+/// status, sanitized body snippet, and error class carried by the source
+/// `LlmError` — the exact masking reported in #3884. The alternate format
+/// walks the chain, and the downcast prefixes a stable class tag so failure
+/// records distinguish auth/rate-limit/invalid-request/model/server/network
+/// failures at a glance.
+fn subagent_failure_message(err: &anyhow::Error) -> String {
+    let class = match err.downcast_ref::<LlmError>() {
+        Some(LlmError::RateLimited { .. }) => Some("rate_limited"),
+        Some(LlmError::ServerError { .. }) => Some("server"),
+        Some(LlmError::NetworkError(_)) | Some(LlmError::Timeout(_)) => Some("network"),
+        Some(LlmError::AuthenticationError(_)) | Some(LlmError::AuthorizationError(_)) => {
+            Some("auth")
+        }
+        Some(LlmError::InvalidRequest { .. }) => Some("invalid_request"),
+        Some(LlmError::ModelError(_)) => Some("model"),
+        Some(LlmError::ContentPolicyError(_)) => Some("content_policy"),
+        Some(LlmError::ContextLengthError(_)) => Some("context_length"),
+        Some(LlmError::ParseError(_)) | Some(LlmError::Other(_)) | None => None,
+    };
+    match class {
+        Some(class) => format!("[{class}] {err:#}"),
+        None => format!("{err:#}"),
+    }
 }
 
 /// When a child agent fails because its model is unavailable under the current

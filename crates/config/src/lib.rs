@@ -3,11 +3,14 @@ pub mod catalog;
 mod harness;
 pub mod model_reference;
 pub mod models_dev;
+pub mod persistence;
 pub mod pricing;
 pub mod provider;
 mod provider_defaults;
 mod provider_kind;
 pub mod route;
+pub mod setup_state;
+pub mod user_constitution;
 pub use harness::{
     HarnessCompactionStrategy, HarnessPosture, HarnessPostureKind, HarnessProfile,
     HarnessSafetyPosture, HarnessToolSurface, built_in_harness_profiles,
@@ -15,6 +18,13 @@ pub use harness::{
 pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
 pub use provider_kind::ProviderKind;
+pub use setup_state::{
+    ConstitutionAuthoring, ConstitutionChoice, ConstitutionSource, ConstitutionValidity,
+    InheritedConfigFacts, RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus,
+};
+pub use user_constitution::{
+    AutonomyPreference, UntrustedDraftParse, UserConstitution, UserConstitutionLoad,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -1021,6 +1031,9 @@ pub struct FleetConfigToml {
 /// three recursion levels out of the box; the root worker still runs at
 /// depth 0 even when the budget is 0.
 pub const DEFAULT_SPAWN_DEPTH: u32 = 3;
+pub const DEFAULT_STREAM_CHUNK_TIMEOUT_SECS: u64 = 900;
+pub const MIN_STREAM_CHUNK_TIMEOUT_SECS: u64 = 1;
+pub const MAX_STREAM_CHUNK_TIMEOUT_SECS: u64 = 3600;
 
 /// Hard ceiling on recursion depth for any worker/sub-agent. The default stays
 /// conservative at [`DEFAULT_SPAWN_DEPTH`], while explicit config can opt into
@@ -1647,6 +1660,9 @@ impl ConfigToml {
 
         match key {
             "provider" => Some(self.provider.as_str().to_string()),
+            "stream_chunk_timeout_secs" | "tui.stream_chunk_timeout_secs" => {
+                Some(self.stream_chunk_timeout_secs().to_string())
+            }
             "api_key" => self.api_key.clone(),
             "base_url" => self.base_url.clone(),
             "http_headers" => serialize_http_headers(&self.http_headers),
@@ -1690,6 +1706,32 @@ impl ConfigToml {
                 value
             }
         })
+    }
+
+    #[must_use]
+    pub fn stream_chunk_timeout_secs(&self) -> u64 {
+        let raw = self
+            .extras
+            .get("tui")
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get("stream_chunk_timeout_secs"))
+            .and_then(toml_value_as_u64)
+            .or_else(|| {
+                self.extras
+                    .get("tui.stream_chunk_timeout_secs")
+                    .and_then(toml_value_as_u64)
+            })
+            .or_else(|| {
+                self.extras
+                    .get("stream_chunk_timeout_secs")
+                    .and_then(toml_value_as_u64)
+            })
+            .unwrap_or(DEFAULT_STREAM_CHUNK_TIMEOUT_SECS);
+        if raw == 0 {
+            DEFAULT_STREAM_CHUNK_TIMEOUT_SECS
+        } else {
+            raw.clamp(MIN_STREAM_CHUNK_TIMEOUT_SECS, MAX_STREAM_CHUNK_TIMEOUT_SECS)
+        }
     }
 
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
@@ -2935,6 +2977,26 @@ impl ConfigStore {
         })
     }
 
+    /// Render the exact body [`save`](Self::save) would write: the serialized
+    /// config with comments and disabled keys from the originally-loaded file
+    /// merged back in. Exposed so setup flows can stage this body into a
+    /// [`persistence::SetupTransaction`] alongside sibling files and keep the
+    /// comment-preserving write atomic with the rest of the transaction.
+    pub fn rendered_body(&self) -> Result<String> {
+        let serialized =
+            toml::to_string_pretty(&self.config).context("failed to serialize config")?;
+        if let Some(ref original_raw) = self.original_raw {
+            Ok(
+                merge_and_preserve_comments(&serialized, original_raw).unwrap_or_else(|e| {
+                    tracing::warn!("failed to merge config comments, saving without them: {e:#}");
+                    serialized
+                }),
+            )
+        } else {
+            Ok(serialized)
+        }
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = normalize_config_file_path(self.path.clone())?;
         if let Some(parent) = path.parent() {
@@ -2942,16 +3004,7 @@ impl ConfigStore {
                 format!("failed to create config directory {}", parent.display())
             })?;
         }
-        let body = if let Some(ref original_raw) = self.original_raw {
-            let serialized =
-                toml::to_string_pretty(&self.config).context("failed to serialize config")?;
-            merge_and_preserve_comments(&serialized, original_raw).unwrap_or_else(|e| {
-                tracing::warn!("failed to merge config comments, saving without them: {e:#}");
-                serialized
-            })
-        } else {
-            toml::to_string_pretty(&self.config).context("failed to serialize config")?
-        };
+        let body = self.rendered_body()?;
         if checked_path_exists(&path)? {
             let existing = read_checked_config_file(&path)?;
             if existing == body {
@@ -3275,6 +3328,14 @@ fn codewhale_home_env_override() -> Option<PathBuf> {
     }
 }
 
+/// Whether `$CODEWHALE_HOME` is set to a non-empty value.
+///
+/// An explicit CodeWhale home is an isolation boundary: state/config resolvers
+/// must not fall back to ambient legacy `~/.deepseek` data outside that root.
+pub fn codewhale_home_is_explicit() -> bool {
+    codewhale_home_env_override().is_some()
+}
+
 /// Resolve the legacy DeepSeek home directory (`$HOME/.deepseek`).
 ///
 /// Always returns the legacy path regardless of whether it exists.
@@ -3584,6 +3645,12 @@ pub fn resolve_permissions_path(config_path: Option<PathBuf>) -> Result<PathBuf>
     checked_permissions_path_for_config_path(&resolve_config_path(config_path)?)
 }
 
+/// Read a resolved `permissions.toml` path using the same checked/no-follow
+/// path handling as config loading.
+pub fn read_permissions_file(path: &Path) -> Result<String> {
+    read_checked_permissions_file(path)
+}
+
 fn load_sibling_permissions(config_path: &Path) -> Result<PermissionsToml> {
     let permissions_path = checked_permissions_path_for_config_path(config_path)?;
     if !checked_path_exists(&permissions_path)? {
@@ -3688,7 +3755,7 @@ pub fn default_config_path() -> Result<PathBuf> {
     // Prefer ~/.codewhale/config.toml when it exists (fresh install or
     // migrated), otherwise fall back to ~/.deepseek/config.toml.
     let primary = codewhale_home()?.join(CONFIG_FILE_NAME);
-    if primary.exists() {
+    if codewhale_home_is_explicit() || primary.exists() {
         return Ok(primary);
     }
     let legacy = legacy_deepseek_home()?.join(CONFIG_FILE_NAME);
@@ -3720,6 +3787,9 @@ impl ConfigMigration {
 /// is loaded; copies the legacy file if the primary doesn't exist yet.
 /// Never overwrites an existing primary config.
 pub fn migrate_config_if_needed() -> Result<Option<ConfigMigration>> {
+    if codewhale_home_is_explicit() {
+        return Ok(None);
+    }
     let primary = codewhale_home()?.join(CONFIG_FILE_NAME);
     if primary.exists() {
         return Ok(None);
@@ -3866,6 +3936,14 @@ pub fn is_sensitive_config_key(key: &str) -> bool {
 
 fn redact_toml_value_for_display(key: &str, value: &toml::Value) -> String {
     redact_toml_value_for_display_inner(key, false, value).to_string()
+}
+
+fn toml_value_as_u64(value: &toml::Value) -> Option<u64> {
+    match value {
+        toml::Value::Integer(value) => u64::try_from(*value).ok(),
+        toml::Value::String(value) => value.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 fn redact_toml_value_for_display_inner(

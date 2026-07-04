@@ -1205,7 +1205,7 @@ pub struct TuiConfig {
     /// Timeout for startup terminal mode/probe calls in milliseconds.
     /// Defaults to 500ms when omitted.
     pub terminal_probe_timeout_ms: Option<u64>,
-    /// Per-SSE-chunk idle timeout in seconds. Defaults to 300 seconds when
+    /// Per-SSE-chunk idle timeout in seconds. Defaults to 900 seconds when
     /// omitted. `0` maps to the default; values clamp to `1..=3600`.
     pub stream_chunk_timeout_secs: Option<u64>,
     /// Ordered list of footer items the user wants visible. `None` (the field
@@ -2807,6 +2807,11 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if let Some(provider) = self.provider.as_deref()
             && ApiProvider::parse(provider).is_none()
+            && self
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.custom_provider_config(provider))
+                .is_none()
         {
             anyhow::bail!(
                 "Invalid provider '{provider}': expected {}.",
@@ -3483,16 +3488,7 @@ impl Config {
             ApiProvider::Anthropic | ApiProvider::Openmodel => {
                 anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
             }
-            ApiProvider::OpenaiCodex => anyhow::bail!(
-                "OpenAI Codex OAuth credentials not found.\n\
-                 \n\
-                 CodeWhale uses your existing ChatGPT/Codex login.\n\
-                 1. Run: codex login      (or use the Codex CLI to authenticate)\n\
-                 2. CodeWhale will read credentials from ~/.codex/auth.json\n\
-                 \n\
-                 Env overrides:\n\
-                   OPENAI_CODEX_ACCESS_TOKEN  or  CODEX_ACCESS_TOKEN"
-            ),
+            ApiProvider::OpenaiCodex => anyhow::bail!("{}", crate::oauth::missing_auth_message()),
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
             ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Ollama => Ok(String::new()),
@@ -3904,7 +3900,7 @@ impl Config {
     ///
     /// Reads `[tui].stream_chunk_timeout_secs`, falling back to the legacy
     /// `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var when the config key is
-    /// omitted. `None` or `0` resolve to the default 300 seconds; explicit
+    /// omitted. `None` or `0` resolve to the default 900 seconds; explicit
     /// values are clamped to `1..=3600`.
     #[must_use]
     pub fn stream_chunk_timeout_secs(&self) -> u64 {

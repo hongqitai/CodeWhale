@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- Added a website localization matrix with a locale registry and drift checks.
+  Harvested from #3763 by @idling11.
+
+### Changed
+
+- Documented the Homebrew rollout strategy and added a distribution-channel
+  check to the release checklist. Harvested from #3760 by @idling11.
+
+### Fixed
+
+- Raised the streamed model-response idle timeout and matched the TUI stall
+  watchdog to the configured stream budget so long reasoning pauses are not
+  recovered as stalled turns (#2487).
+- Fixed Codex OAuth/sub-agent release diagnostics so `auth list` reports an
+  active Codex OAuth file, Responses API child requests encode inherited tool
+  names safely, and rate-limited Codex child requests checkpoint as resumable
+  provider interruptions instead of terminal opaque failures (#3884).
+- Fixed fresh launch/setup testing with an explicit `CODEWHALE_HOME` so config,
+  settings, theme prefs, and doctor legacy-state diagnostics do not inherit
+  unrelated ambient `~/.deepseek` files.
+
+### Removed
+
+- Removed unused model-registry helpers. Harvested from #3872 by @cyq1017.
+- Removed unused request-tuning metadata. Harvested from #3871 by @cyq1017.
 
 ## [0.8.66] - 2026-06-29
 

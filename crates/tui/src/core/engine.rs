@@ -58,7 +58,7 @@ use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
-use crate::worker_profile::ModelRoute;
+use crate::worker_profile::{ModelRoute, WorkerRuntimeProfile};
 use crate::working_set::WorkingSet;
 
 use super::events::{Event, TurnOutcomeStatus};
@@ -1463,6 +1463,9 @@ impl Engine {
                             self.session.reasoning_effort.clone(),
                             self.session.reasoning_effort_auto,
                         )
+                        .with_agent_tool_surface_options(self.agent_tool_surface_options(
+                            shell_policy_for_mode(AppMode::Agent, self.session.allow_shell),
+                        ))
                         .with_max_spawn_depth(self.config.max_spawn_depth)
                         .with_step_api_timeout(self.config.subagent_api_timeout)
                         .with_speech_output_dir(self.config.speech_output_dir.clone())
@@ -1540,6 +1543,32 @@ impl Engine {
                             tracing::debug!(
                                 "Event channel full; dropping ListSubAgents refresh (will retry next drain)"
                             );
+                        }
+                    }
+                    Op::CancelSubAgent { agent_id } => {
+                        let result = {
+                            let mut manager = self.subagent_manager.write().await;
+                            match manager.cancel_agent(&agent_id) {
+                                Ok(_) => Ok(manager.list()),
+                                Err(err) => Err(err),
+                            }
+                        };
+                        match result {
+                            Ok(agents) => {
+                                if let Err(_e) = self.tx_event.try_send(Event::AgentList { agents })
+                                {
+                                    tracing::debug!(
+                                        "Event channel full; dropping CancelSubAgent refresh"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                let _ =
+                                    self.tx_event
+                                        .try_send(Event::error(ErrorEnvelope::transient(format!(
+                                            "Failed to cancel sub-agent {agent_id}: {err}"
+                                        ))));
+                            }
                         }
                     }
                     Op::ChangeMode {
@@ -2494,62 +2523,64 @@ impl Engine {
             None
         };
 
-        let mut tool_registry = match input_policy.mode {
-            AppMode::Agent | AppMode::Auto | AppMode::Yolo => {
-                if subagents_available {
-                    let runtime = if let Some(client) = self.deepseek_client.clone() {
-                        let mut rt = SubAgentRuntime::new(
-                            client,
-                            self.session.model.clone(),
-                            tool_context.clone(),
-                            self.session.allow_shell,
-                            Some(self.tx_event.clone()),
-                            Arc::clone(&self.subagent_manager),
-                        )
-                        .with_role_models(self.config.subagent_model_overrides.clone())
-                        .with_auto_model(self.session.auto_model)
-                        .with_reasoning_effort(
-                            self.session.reasoning_effort.clone(),
-                            self.session.reasoning_effort_auto,
-                        )
-                        .with_max_spawn_depth(self.config.max_spawn_depth)
-                        .with_step_api_timeout(self.config.subagent_api_timeout)
-                        .with_speech_output_dir(self.config.speech_output_dir.clone())
-                        .with_mcp_pool(mcp_pool.clone())
-                        .with_todos(self.config.todos.clone())
-                        .with_parent_completion_tx(self.tx_subagent_completion.clone());
-                        if let Some(context) = fork_context_for_runtime.clone() {
-                            rt = rt.with_fork_context(context);
-                        }
-                        if let Some((mailbox, cancel_token)) = mailbox_for_runtime.as_ref() {
-                            rt = rt
-                                .with_mailbox(mailbox.clone())
-                                .with_cancel_token(cancel_token.clone());
-                        }
-                        Some(rt)
-                    } else {
-                        None
-                    };
-                    if let Some(subagent_runtime) = runtime {
-                        Some(
-                            builder
-                                .with_subagent_tools(
-                                    self.subagent_manager.clone(),
-                                    subagent_runtime,
-                                )
-                                .build(tool_context),
-                        )
-                    } else {
-                        tracing::warn!(
-                            "Sub-agents enabled but no API client available, falling back to basic tool set"
-                        );
-                        Some(builder.build(tool_context))
-                    }
-                } else {
-                    Some(builder.build(tool_context))
+        let mut tool_registry = if subagents_available {
+            let runtime = if let Some(client) = self.deepseek_client.clone() {
+                let runtime_allow_shell =
+                    self.session.allow_shell && !matches!(input_policy.mode, AppMode::Plan);
+                let runtime_shell_policy =
+                    shell_policy_for_mode(input_policy.mode, runtime_allow_shell);
+                let mut rt = SubAgentRuntime::new(
+                    client,
+                    self.session.model.clone(),
+                    tool_context.clone(),
+                    runtime_allow_shell,
+                    Some(self.tx_event.clone()),
+                    Arc::clone(&self.subagent_manager),
+                )
+                .with_role_models(self.config.subagent_model_overrides.clone())
+                .with_auto_model(self.session.auto_model)
+                .with_reasoning_effort(
+                    self.session.reasoning_effort.clone(),
+                    self.session.reasoning_effort_auto,
+                )
+                .with_agent_tool_surface_options(
+                    self.agent_tool_surface_options(runtime_shell_policy),
+                )
+                .with_max_spawn_depth(self.config.max_spawn_depth)
+                .with_step_api_timeout(self.config.subagent_api_timeout)
+                .with_speech_output_dir(self.config.speech_output_dir.clone())
+                .with_mcp_pool(mcp_pool.clone())
+                .with_todos(self.config.todos.clone())
+                .with_parent_completion_tx(self.tx_subagent_completion.clone());
+                if matches!(input_policy.mode, AppMode::Plan) {
+                    rt.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Plan);
                 }
+                if let Some(context) = fork_context_for_runtime.clone() {
+                    rt = rt.with_fork_context(context);
+                }
+                if let Some((mailbox, cancel_token)) = mailbox_for_runtime.as_ref() {
+                    rt = rt
+                        .with_mailbox(mailbox.clone())
+                        .with_cancel_token(cancel_token.clone());
+                }
+                Some(rt)
+            } else {
+                None
+            };
+            if let Some(subagent_runtime) = runtime {
+                Some(
+                    builder
+                        .with_subagent_tools(self.subagent_manager.clone(), subagent_runtime)
+                        .build(tool_context),
+                )
+            } else {
+                tracing::warn!(
+                    "Sub-agents enabled but no API client available, falling back to basic tool set"
+                );
+                Some(builder.build(tool_context))
             }
-            _ => Some(builder.build(tool_context)),
+        } else {
+            Some(builder.build(tool_context))
         };
 
         // Load plugin tools from the user's tools directory and apply any
@@ -2949,13 +2980,23 @@ impl Engine {
             .min(target_budget.saturating_sub(1))
             .max(1);
 
+        // Preserve the working-set pins on the emergency/preflight path too.
+        // Previously this passed None/None, so a compaction routed here (which,
+        // on large windows, is the path that actually fires) could summarize
+        // away pinned errors, patches, and the files the user is editing.
+        let compaction_pins = self
+            .session
+            .working_set
+            .pinned_message_indices(&self.session.messages, &self.session.workspace);
+        let compaction_paths = self.session.working_set.top_paths(24);
+
         match compact_messages_safe(
             client,
             &self.session.messages,
             &forced_config,
             Some(&self.session.workspace),
-            None,
-            None,
+            Some(&compaction_pins),
+            Some(&compaction_paths),
         )
         .await
         {
@@ -3482,7 +3523,7 @@ struct EffectiveInputPolicy {
 fn effective_input_policy(
     provenance: UserInputProvenance,
     requested_mode: AppMode,
-    content: &str,
+    _content: &str,
     allow_shell: bool,
     trust_mode: bool,
     auto_approve: bool,
@@ -3492,7 +3533,7 @@ fn effective_input_policy(
     let mut trust_mode = trust_mode;
     let mut auto_approve = auto_approve;
     let mut approval_mode = approval_mode;
-    let mut dynamic_active_tools = Vec::new();
+    let dynamic_active_tools = Vec::new();
     let mut status = None;
 
     if !provenance_can_inherit_standing_auto_authority(provenance) {
@@ -3517,14 +3558,6 @@ fn effective_input_policy(
                 provenance.as_str()
             ));
         }
-    } else if is_review_only_user_intent(content) {
-        // Advisory only: never silently override an explicitly chosen mode
-        // or strip its tools. Surface the question modal dynamically so the
-        // model can ask focused follow-ups without inflating every tool prompt.
-        dynamic_active_tools.push(REQUEST_USER_INPUT_NAME);
-        status = Some(
-            "Review/inspection request detected; keeping the current mode and exposing request_user_input for focused follow-up questions.".to_string(),
-        );
     }
 
     EffectiveInputPolicy {
@@ -3545,49 +3578,6 @@ fn provenance_can_inherit_standing_auto_authority(provenance: UserInputProvenanc
             | UserInputProvenance::Runtime
             | UserInputProvenance::SubAgentHandoff
     )
-}
-
-fn is_review_only_user_intent(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    let asks_to_inspect = [
-        "look",
-        "check",
-        "review",
-        "inspect",
-        "scan",
-        "audit",
-        "看看",
-        "看一下",
-        "检查",
-        "审查",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    if !asks_to_inspect {
-        return false;
-    }
-
-    let explicit_write = [
-        "fix",
-        "change",
-        "update",
-        "implement",
-        "apply",
-        "patch",
-        "modify",
-        "edit",
-        "write",
-        "commit",
-        "修",
-        "改",
-        "补",
-        "提交",
-        "写",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-
-    !explicit_write
 }
 
 fn agent_approval_mode_for_turn(
@@ -3653,7 +3643,14 @@ pub(super) fn auto_review_plan_decision(
         crate::tui::auto_review::AutoReviewAction::Allow
         | crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
         crate::tui::auto_review::AutoReviewAction::HoldForReview => {
-            let reason = format!("Auto-review policy requires approval: {}", decision.reason);
+            // HoldForReview only originates from the built-in safety floor
+            // (configured rules produce Allow/Block), so name the gate
+            // honestly instead of blaming an "auto-review policy" the user
+            // may never have configured (#3883).
+            let reason = format!(
+                "Built-in safety gate requires approval: {}",
+                decision.reason
+            );
             if matches!(approval_mode, crate::tui::approval::ApprovalMode::Never) {
                 AutoReviewPlanDecision::Block(reason)
             } else {
@@ -3875,10 +3872,13 @@ mod approval;
 mod context;
 mod handle;
 pub(crate) use context::compact_tool_result_for_context;
+/// Public so external hosts/wrappers can reuse the engine's input-budget math
+/// (see `context_input_budget_for_route`'s doc) instead of re-deriving it.
+pub use context::context_input_budget_for_route;
 #[cfg(test)]
 use context::route_context_budget_for_provider;
 use context::{
-    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP, context_input_budget_for_route,
+    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
     effective_max_output_tokens_for_route, estimate_input_tokens_conservative,
     extract_compaction_summary_prompt, is_context_length_error_message,
     route_context_budget_for_route, summarize_text,

@@ -233,6 +233,74 @@ fn persist_subagents_value_key(
     Ok(path)
 }
 
+pub(crate) fn persist_table_bool_key(
+    config_path: Option<&Path>,
+    table_name: &str,
+    key: &str,
+    value: bool,
+) -> anyhow::Result<PathBuf> {
+    persist_table_value_key(config_path, table_name, key, toml::Value::Boolean(value))
+}
+
+pub(crate) fn persist_table_string_key(
+    config_path: Option<&Path>,
+    table_name: &str,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<PathBuf> {
+    persist_table_value_key(
+        config_path,
+        table_name,
+        key,
+        toml::Value::String(value.to_string()),
+    )
+}
+
+fn persist_table_value_key(
+    config_path: Option<&Path>,
+    table_name: &str,
+    key: &str,
+    value: toml::Value,
+) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    use std::fs;
+
+    let path = config_toml_path(config_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+
+    let (mut doc, original_raw) = if path.exists() {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read config at {}", path.display()))?;
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
+    } else {
+        (toml::Value::Table(toml::value::Table::new()), None)
+    };
+    let root = doc
+        .as_table_mut()
+        .context("config.toml root must be a table")?;
+    let section = root
+        .entry(table_name.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let section_table = section
+        .as_table_mut()
+        .with_context(|| format!("`{table_name}` section in config.toml must be a table"))?;
+    section_table.insert(key.to_string(), value);
+
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
+    Ok(path)
+}
+
 pub(crate) fn persist_provider_base_url_key(
     config_path: Option<&Path>,
     provider: ApiProvider,
@@ -327,6 +395,122 @@ fn provider_base_url_table_key(provider: ApiProvider) -> anyhow::Result<&'static
     }
 }
 
+pub(crate) fn persist_custom_provider(
+    config_path: Option<&Path>,
+    provider_id: &str,
+    base_url: &str,
+    model: Option<&str>,
+    api_key_env: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    use std::fs;
+
+    let provider_id = normalize_custom_provider_id(provider_id)?;
+    let base_url = normalize_custom_provider_base_url(base_url)?;
+    let model = model.and_then(normalize_optional_custom_provider_field);
+    let api_key_env = api_key_env.and_then(normalize_optional_custom_provider_field);
+
+    let path = config_toml_path(config_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+
+    let (mut doc, original_raw) = if path.exists() {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read config at {}", path.display()))?;
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
+    } else {
+        (toml::Value::Table(toml::value::Table::new()), None)
+    };
+
+    let table = doc
+        .as_table_mut()
+        .context("config.toml root must be a table")?;
+    table.insert(
+        "provider".to_string(),
+        toml::Value::String(provider_id.clone()),
+    );
+    let providers = table
+        .entry("providers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .context("`providers` must be a table")?;
+    let entry = providers
+        .entry(provider_id.clone())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("`providers.{provider_id}` must be a table"))?;
+    entry.insert(
+        "kind".to_string(),
+        toml::Value::String("openai-compatible".to_string()),
+    );
+    entry.insert("base_url".to_string(), toml::Value::String(base_url));
+    if let Some(model) = model {
+        entry.insert("model".to_string(), toml::Value::String(model));
+    } else {
+        entry.remove("model");
+    }
+    if let Some(api_key_env) = api_key_env {
+        entry.insert("api_key_env".to_string(), toml::Value::String(api_key_env));
+    } else {
+        entry.remove("api_key_env");
+    }
+
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+fn normalize_custom_provider_id(raw: &str) -> anyhow::Result<String> {
+    use anyhow::bail;
+
+    let value = raw.trim();
+    if value.is_empty() {
+        bail!("custom provider name is required");
+    }
+    if value == "__custom__" {
+        bail!("custom provider name is reserved");
+    }
+    if crate::config::ApiProvider::parse(value).is_some() {
+        bail!("custom provider name must not shadow a built-in provider");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        bail!("custom provider name may only use letters, numbers, '-' and '_'");
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_custom_provider_base_url(raw: &str) -> anyhow::Result<String> {
+    use anyhow::bail;
+
+    let value = raw.trim().trim_end_matches('/');
+    if value.is_empty() {
+        bail!("custom provider base URL is required");
+    }
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|err| anyhow::anyhow!("custom provider base URL is invalid: {err}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        bail!("custom provider base URL must be an http(s) URL with a host");
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_optional_custom_provider_field(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 pub(crate) fn persist_hotbar_bindings(
     config_path: Option<&Path>,
     bindings: &[codewhale_config::HotbarBindingToml],
@@ -399,9 +583,14 @@ pub(crate) fn config_toml_path(config_path: Option<&Path>) -> anyhow::Result<Pat
             return Ok(PathBuf::from(trimmed));
         }
     }
+    let codewhale_home = codewhale_config::codewhale_home()
+        .context("failed to resolve CodeWhale home for config.toml path")?;
+    let primary = codewhale_home.join("config.toml");
+    if codewhale_config::codewhale_home_is_explicit() {
+        return Ok(primary);
+    }
     let home =
         effective_home_dir().context("failed to resolve home directory for config.toml path")?;
-    let primary = home.join(".codewhale").join("config.toml");
     if primary.exists() {
         return Ok(primary);
     }
@@ -443,6 +632,7 @@ mod tests {
     struct EnvGuard {
         home: Option<OsString>,
         userprofile: Option<OsString>,
+        codewhale_home: Option<OsString>,
         codewhale_config_path: Option<OsString>,
         deepseek_config_path: Option<OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -456,6 +646,7 @@ mod tests {
             let config_str = OsString::from(config_path.as_os_str());
             let home_prev = env::var_os("HOME");
             let userprofile_prev = env::var_os("USERPROFILE");
+            let codewhale_home_prev = env::var_os("CODEWHALE_HOME");
             let codewhale_config_prev = env::var_os("CODEWHALE_CONFIG_PATH");
             let deepseek_config_prev = env::var_os("DEEPSEEK_CONFIG_PATH");
 
@@ -463,6 +654,7 @@ mod tests {
             unsafe {
                 env::set_var("HOME", &home_str);
                 env::set_var("USERPROFILE", &home_str);
+                env::remove_var("CODEWHALE_HOME");
                 env::remove_var("CODEWHALE_CONFIG_PATH");
                 env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
             }
@@ -470,6 +662,7 @@ mod tests {
             Self {
                 home: home_prev,
                 userprofile: userprofile_prev,
+                codewhale_home: codewhale_home_prev,
                 codewhale_config_path: codewhale_config_prev,
                 deepseek_config_path: deepseek_config_prev,
                 _lock: lock,
@@ -500,6 +693,18 @@ mod tests {
                 // Safety: test-only environment mutation guarded by a global mutex.
                 unsafe {
                     env::remove_var("USERPROFILE");
+                }
+            }
+
+            if let Some(value) = self.codewhale_home.take() {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    env::set_var("CODEWHALE_HOME", value);
+                }
+            } else {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    env::remove_var("CODEWHALE_HOME");
                 }
             }
 
@@ -592,6 +797,26 @@ mod tests {
     }
 
     #[test]
+    fn config_toml_path_ignores_legacy_config_when_codewhale_home_is_explicit() {
+        let temp_root = temp_root("codewhale-config-path-explicit-home");
+        let explicit_home = temp_root.join("isolated-codewhale");
+        let legacy_config = temp_root.join(".deepseek").join("config.toml");
+        fs::create_dir_all(legacy_config.parent().unwrap()).unwrap();
+        fs::write(&legacy_config, "").unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+
+        unsafe {
+            env::remove_var("DEEPSEEK_CONFIG_PATH");
+            env::set_var("CODEWHALE_HOME", &explicit_home);
+        }
+
+        assert_eq!(
+            config_toml_path(None).unwrap(),
+            explicit_home.join("config.toml")
+        );
+    }
+
+    #[test]
     fn config_toml_path_prefers_codewhale_env_over_legacy_env() {
         let temp_root = temp_root("codewhale-config-path-env");
         fs::create_dir_all(&temp_root).unwrap();
@@ -664,6 +889,135 @@ mod tests {
             body.contains("allow_shell = true"),
             "new key not written: {body}"
         );
+    }
+
+    #[test]
+    fn persist_table_bool_key_updates_existing_memory_enabled() {
+        let temp_root = temp_root("codewhale-persist-memory-update");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+
+        let path = temp_root.join(".deepseek").join("config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "allow_shell = true\n\n[memory]\nenabled = true\n").unwrap();
+
+        let written = persist_table_bool_key(Some(&path), "memory", "enabled", false)
+            .expect("persist should succeed");
+        let body = fs::read_to_string(&written).expect("written file should be readable");
+        assert!(
+            body.contains("enabled = false"),
+            "memory enabled should be false: {body}"
+        );
+        assert!(
+            !body.contains("enabled = true"),
+            "memory enabled should not still be true: {body}"
+        );
+    }
+
+    #[test]
+    fn persist_memory_enabled_round_trips_through_config_load() {
+        let temp_root = temp_root("codewhale-persist-memory-roundtrip");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+
+        let path = temp_root.join(".deepseek").join("config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Initial config has memory enabled = true
+        fs::write(&path, "allow_shell = true\n\n[memory]\nenabled = true\n").unwrap();
+
+        // Verify initial state
+        let cfg0 = crate::config::Config::load(Some(path.clone()), None)
+            .expect("initial config should load");
+        assert!(cfg0.memory_enabled(), "memory should be enabled initially");
+
+        // Persist memory.enabled = false (what the GUI's set_config endpoint does)
+        persist_table_bool_key(Some(&path), "memory", "enabled", false)
+            .expect("persist should succeed");
+
+        // Reload config from disk and verify memory_enabled() reflects the change
+        let cfg1 = crate::config::Config::load(Some(path.clone()), None)
+            .expect("reloaded config should load");
+        assert!(
+            !cfg1.memory_enabled(),
+            "memory should be disabled after persisting false"
+        );
+    }
+
+    #[test]
+    fn persist_custom_provider_writes_named_openai_compatible_table() {
+        let temp_root = temp_root("codewhale-custom-provider-persist");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+
+        let path = temp_root.join(".codewhale").join("config.toml");
+        let written = persist_custom_provider(
+            Some(&path),
+            "acme_ai",
+            "https://api.acme.example/v1/",
+            Some("acme/code-1"),
+            Some("ACME_API_KEY"),
+        )
+        .expect("custom provider should persist");
+        let body = fs::read_to_string(&written).expect("written file should be readable");
+
+        assert!(body.contains("provider = \"acme_ai\""), "{body}");
+        assert!(body.contains("[providers.acme_ai]"), "{body}");
+        assert!(body.contains("kind = \"openai-compatible\""), "{body}");
+        assert!(
+            body.contains("base_url = \"https://api.acme.example/v1\""),
+            "{body}"
+        );
+        assert!(body.contains("model = \"acme/code-1\""), "{body}");
+        assert!(body.contains("api_key_env = \"ACME_API_KEY\""), "{body}");
+        assert!(
+            !body.contains("sk-"),
+            "helper must not persist raw secret values: {body}"
+        );
+
+        let loaded =
+            crate::config::Config::load(Some(written.clone()), None).expect("config should load");
+        assert_eq!(loaded.provider.as_deref(), Some("acme_ai"));
+        assert_eq!(loaded.api_provider(), crate::config::ApiProvider::Custom);
+        let entry = loaded
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom_provider_config("acme_ai"))
+            .expect("custom provider entry");
+        assert!(entry.is_openai_compatible_custom());
+        assert_eq!(
+            entry.base_url.as_deref(),
+            Some("https://api.acme.example/v1")
+        );
+        assert_eq!(entry.model.as_deref(), Some("acme/code-1"));
+        assert_eq!(entry.api_key_env.as_deref(), Some("ACME_API_KEY"));
+    }
+
+    #[test]
+    fn persist_custom_provider_rejects_builtin_or_invalid_names() {
+        let temp_root = temp_root("codewhale-custom-provider-invalid");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let path = temp_root.join(".codewhale").join("config.toml");
+
+        let builtin = persist_custom_provider(
+            Some(&path),
+            "openrouter",
+            "https://api.example.invalid/v1",
+            None,
+            None,
+        )
+        .expect_err("built-in names should be rejected");
+        assert!(builtin.to_string().contains("built-in provider"));
+
+        let bad_chars = persist_custom_provider(
+            Some(&path),
+            "my provider",
+            "https://api.example.invalid/v1",
+            None,
+            None,
+        )
+        .expect_err("space in name should be rejected");
+        assert!(bad_chars.to_string().contains("letters, numbers"));
     }
 
     #[test]

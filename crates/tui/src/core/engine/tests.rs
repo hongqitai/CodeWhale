@@ -468,12 +468,7 @@ fn model_turn_event_timeout() -> Duration {
 }
 
 #[test]
-fn auto_review_classifies_publish_but_no_longer_force_prompts_it() {
-    // #3790: publish-like shell is still *classified* as publish (audit only),
-    // but with the safety floor removed the policy no longer forces a prompt.
-    // The mode alone decides: Agent prompts via the normal approval path, YOLO
-    // runs with zero prompts. Previously this returned ForcePrompt with a
-    // hold_for_review audit decision and was overridden past YOLO.
+fn auto_review_classifies_publish_and_force_prompts_it() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
@@ -485,9 +480,15 @@ fn auto_review_classifies_publish_but_no_longer_force_prompts_it() {
         false,
     );
 
-    assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::ForcePrompt(
+            "Built-in safety gate requires approval: publish-like action requires durable review"
+                .to_string()
+        )
+    );
     assert_eq!(audit["action_kind"], "publish");
-    assert_ne!(audit["decision"], "hold_for_review");
+    assert_eq!(audit["decision"], "hold_for_review");
 }
 
 #[test]
@@ -509,11 +510,7 @@ fn auto_review_policy_does_not_force_prompt_for_shell_git_tag_list_probe() {
 }
 
 #[test]
-fn auto_review_policy_no_longer_holds_publish_even_when_approval_is_never() {
-    // #3790: the publish "durable review" floor was removed and deferred to
-    // 0.8.67. The auto-review policy no longer forces a hold or a Never-block
-    // for a publish-like action; refusal is the job of a typed deny rule or the
-    // approval gate (ApprovalMode::Never denies at the chokepoint), not a floor.
+fn auto_review_policy_blocks_publish_when_approval_is_never() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "github_publish_release",
@@ -525,9 +522,15 @@ fn auto_review_policy_no_longer_holds_publish_even_when_approval_is_never() {
         false,
     );
 
-    assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::Block(
+            "Built-in safety gate requires approval: publish-like action requires durable review"
+                .to_string()
+        )
+    );
     assert_eq!(audit["approval_mode"], "NEVER");
-    assert_ne!(audit["decision"], "hold_for_review");
+    assert_eq!(audit["decision"], "hold_for_review");
 }
 
 #[test]
@@ -584,29 +587,31 @@ fn auto_review_run_origin_marks_detached_tools_as_background() {
 }
 
 #[test]
-fn auto_review_policy_no_longer_holds_background_destructive_under_suggest() {
-    // #3790: the background/headless destructive floor was removed and deferred
-    // to 0.8.67. Agent-mode prompting for a write-capable shell still happens
-    // via the normal registered-tool approval path; the auto-review policy no
-    // longer force-prompts it.
+fn auto_review_policy_holds_background_destructive_under_suggest() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
-        &json!({"command": "cargo test", "background": true}),
+        &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Suggest,
-        Some("run tests in the background"),
+        Some("wipe the home directory in the background"),
         true,
         false,
     );
 
-    assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::ForcePrompt(
+            "Built-in safety gate requires approval: destructive background/headless action requires durable review"
+                .to_string()
+        )
+    );
     assert_eq!(audit["run_origin"], "background");
-    assert_ne!(audit["decision"], "hold_for_review");
+    assert_eq!(audit["decision"], "hold_for_review");
 }
 
 #[test]
-fn auto_review_policy_preserves_yolo_for_detached_destructive_tools() {
+fn auto_review_policy_holds_yolo_detached_destructive_tools() {
     for run_origin in [
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::auto_review::RunOrigin::Headless,
@@ -614,40 +619,50 @@ fn auto_review_policy_preserves_yolo_for_detached_destructive_tools() {
         let (decision, audit) = auto_review_plan_decision(
             &crate::tui::auto_review::AutoReviewPolicy::default(),
             "exec_shell",
-            &json!({"command": "cargo test", "background": true}),
+            &json!({"command": "rm -rf ~/", "background": true}),
             run_origin,
             crate::tui::approval::ApprovalMode::Bypass,
-            Some("run tests in the background"),
+            Some("wipe the home directory in the background"),
             true,
             false,
         );
 
-        assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+        assert_eq!(
+            decision,
+            AutoReviewPlanDecision::ForcePrompt(
+                "Built-in safety gate requires approval: destructive background/headless action requires durable review"
+                    .to_string()
+            )
+        );
         assert_eq!(audit["approval_mode"], "BYPASS");
         assert_eq!(audit["run_origin"], run_origin.as_str());
-        assert_eq!(audit["decision"], "ask_user");
+        assert_eq!(audit["decision"], "hold_for_review");
     }
 }
 
 #[test]
-fn auto_review_policy_no_longer_blocks_background_destructive_under_never() {
-    // #3790: with the background/headless destructive floor removed, the policy
-    // returns NoChange even under Never; Never denies at the approval gate, not
-    // via an auto-review hold. Deferred to 0.8.67.
+fn auto_review_policy_blocks_background_destructive_under_never() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
-        &json!({"command": "cargo test", "background": true}),
+        &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Never,
-        Some("run tests in the background"),
+        Some("wipe the home directory in the background"),
         true,
         false,
     );
 
-    assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::Block(
+            "Built-in safety gate requires approval: destructive background/headless action requires durable review"
+                .to_string()
+        )
+    );
     assert_eq!(audit["approval_mode"], "NEVER");
     assert_eq!(audit["run_origin"], "background");
+    assert_eq!(audit["decision"], "hold_for_review");
 }
 
 #[test]
@@ -2608,13 +2623,7 @@ async fn yolo_mode_does_not_prompt_for_model_driven_typed_ask_rule() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn yolo_mode_does_not_prompt_for_background_shell() {
-    // #3790 regression guard: YOLO is the sole authority and runs every tool
-    // with zero prompts, including a background shell (input `background: true`,
-    // which gets RunOrigin::Background and is classified RiskLevel::Destructive).
-    // The auto-review override "safety floor" that used to force a prompt here —
-    // even in YOLO — was removed; the mode now decides alone. A typed Block/deny
-    // rule still hard-blocks regardless of mode.
+async fn yolo_mode_still_prompts_for_background_destructive_shell() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2625,7 +2634,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-bg\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
         "{\"index\":0,\"id\":\"call_bg\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo bg-yolo-marker\\\",\\\"background\\\":true}\"}}",
+        "\"arguments\":\"{\\\"command\\\":\\\"rm -rf ~/\\\",\\\"background\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-bg\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -2639,11 +2648,164 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
         "data: [DONE]\n\n",
     );
 
-    // The second request carries the background-start tool result, which contains
-    // "Background task started" — match it for the terminal "done" response.
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_string_contains("Background task started"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let handle_for_approval = handle.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "please run a background shell".to_string(),
+            mode: AppMode::Yolo,
+            provider: None,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            show_thinking: true,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send model turn");
+
+    let mut saw_approval_prompt = false;
+    let mut saw_tool_result = false;
+    let mut saw_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for engine event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
+                saw_approval_prompt = true;
+                assert_eq!(tool_name, "exec_shell");
+                assert!(approval_force_prompt);
+                assert!(
+                    description.contains("destructive background/headless"),
+                    "unexpected approval description: {description}"
+                );
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny background shell");
+            }
+            Event::ToolCallComplete { name, result, .. } => {
+                if name == "exec_shell" {
+                    saw_tool_result = true;
+                    let err = result.expect_err("denied shell should not execute");
+                    assert!(
+                        err.to_string().contains("denied by user"),
+                        "unexpected shell denial: {err:?}"
+                    );
+                }
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                saw_complete = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(saw_approval_prompt);
+    assert!(saw_tool_result);
+    assert!(saw_complete);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn yolo_mode_does_not_prompt_for_background_shell() {
+    // #3883: the durable-review floor keys on what the command does, not on
+    // "not provably read-only". An ordinary background command in YOLO must
+    // run without a prompt; genuinely destructive and publish-like background
+    // work still holds (see the sibling tests).
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_bgok\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
+        "\"arguments\":\"{\\\"command\\\":\\\"echo bg-yolo-no-prompt\\\",\\\"background\\\":true}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("bg-yolo-no-prompt"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -2709,6 +2871,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
         .await
         .expect("send model turn");
 
+    let mut saw_tool_result = false;
     let mut saw_complete = false;
     let mut rx = handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
@@ -2717,19 +2880,22 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     {
         match event {
             Event::ApprovalRequired { .. } => {
-                panic!("YOLO mode must not prompt for a background shell command");
+                panic!("YOLO mode must not prompt for an ordinary background shell command");
             }
-            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
-                saw_complete = true;
-                let result = result.expect("shell result");
-                assert!(result.success, "{result:?}");
-                assert!(
-                    result.content.contains("Background task started"),
-                    "expected a background start, got: {result:?}"
-                );
+            Event::ToolCallComplete { name, result, .. } => {
+                if name == "exec_shell" {
+                    saw_tool_result = true;
+                    let result = result.expect("shell result");
+                    assert!(result.success, "{result:?}");
+                    assert!(
+                        result.content.contains("Background task started"),
+                        "expected a background start, got: {result:?}"
+                    );
+                }
             }
             Event::TurnComplete { status, .. } => {
                 assert_eq!(status, TurnOutcomeStatus::Completed);
+                saw_complete = true;
                 break;
             }
             _ => {}
@@ -2739,19 +2905,13 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
+    assert!(saw_tool_result);
     assert!(saw_complete);
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn yolo_mode_runs_publish_like_shell_without_a_prompt() {
-    // #3790: YOLO is the sole authority and runs every tool with zero prompts —
-    // including publish-like shell (`git push` / `cargo publish` / `gh release`).
-    // The old #3735 behavior force-prompted publish past YOLO via the auto-review
-    // safety floor; that floor was removed and the mode now decides alone. So no
-    // Event::ApprovalRequired may fire, and the command must run. (Backgrounded
-    // so the mock's terminal response keys off the stable "Background task
-    // started" tool result; the publish-like classification is what matters.)
+async fn yolo_mode_prompts_for_publish_like_shell_safety_floor() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2778,7 +2938,7 @@ async fn yolo_mode_runs_publish_like_shell_without_a_prompt() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_string_contains("Background task started"))
+        .and(body_string_contains("denied by user"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -2815,6 +2975,7 @@ async fn yolo_mode_runs_publish_like_shell_without_a_prompt() {
         },
         &api_config,
     );
+    let handle_for_approval = handle.clone();
     let run_task = tokio::spawn(engine.run());
 
     handle
@@ -2852,8 +3013,31 @@ async fn yolo_mode_runs_publish_like_shell_without_a_prompt() {
         .expect("timed out waiting for engine event")
     {
         match event {
-            Event::ApprovalRequired { .. } => {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                approval_force_prompt,
+                ..
+            } => {
                 saw_approval_prompt = true;
+                assert_eq!(tool_name, "exec_shell");
+                assert!(approval_force_prompt);
+                assert!(
+                    description.contains("publish-like"),
+                    "unexpected approval description: {description}"
+                );
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny publish-like shell");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
+                let err = result.expect_err("denied publish shell should not execute");
+                assert!(
+                    err.to_string().contains("denied by user"),
+                    "unexpected shell denial: {err:?}"
+                );
             }
             Event::TurnComplete { status, .. } => {
                 assert_eq!(status, TurnOutcomeStatus::Completed);
@@ -2868,10 +3052,10 @@ async fn yolo_mode_runs_publish_like_shell_without_a_prompt() {
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
     assert!(
-        !saw_approval_prompt,
-        "YOLO must run publish-like shell with zero prompts (#3790)"
+        saw_approval_prompt,
+        "YOLO must still prompt for publish-like shell (#3735/#3736)"
     );
-    assert!(saw_complete, "the YOLO publish-like turn should complete");
+    assert!(saw_complete, "the denied publish-like turn should complete");
 }
 
 #[tokio::test]
@@ -3281,6 +3465,49 @@ fn parent_turn_registry_includes_goal_tools_for_all_modes() {
             );
         }
     }
+}
+
+#[test]
+fn plan_mode_registry_can_expose_agent_launcher_without_shell_tools() {
+    let tmp = tempdir().expect("tempdir");
+    let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let context = engine.build_tool_context(AppMode::Plan, false);
+    let client = DeepSeekClient::new(&Config {
+        api_key: Some("test-key".to_string()),
+        ..Config::default()
+    })
+    .expect("stub client");
+    let manager = crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = SubAgentRuntime::new(
+        client,
+        DEFAULT_TEXT_MODEL.to_string(),
+        context.clone(),
+        false,
+        None,
+        manager.clone(),
+    )
+    .with_agent_tool_surface_options(
+        engine.agent_tool_surface_options(shell_policy_for_mode(AppMode::Plan, false)),
+    );
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Plan);
+
+    let registry = engine
+        .build_turn_tool_registry_builder(
+            AppMode::Plan,
+            engine.config.todos.clone(),
+            engine.config.plan_state.clone(),
+        )
+        .with_subagent_tools(manager, runtime)
+        .build(context);
+
+    assert!(
+        registry.contains("agent"),
+        "Plan mode should be able to request focused read-only sub-agents"
+    );
+    assert!(
+        !registry.contains("exec_shell"),
+        "Plan mode must remain shell-free while exposing sub-agent delegation"
+    );
 }
 
 #[test]
@@ -4588,70 +4815,89 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
 }
 
 #[test]
-fn review_only_external_input_keeps_explicit_mode_with_advisory_hint() {
-    // Review-only wording must NEVER silently override an explicitly chosen
-    // mode or strip its tools. The heuristic only activates the existing
-    // request_user_input modal tool so the model can ask focused follow-ups.
+fn self_generated_fake_approvals_cannot_authorize_work() {
+    let non_authoritative_origins = [
+        UserInputProvenance::ImportedTranscript,
+        UserInputProvenance::MemoryRecall,
+        UserInputProvenance::AssistantGenerated,
+    ];
 
-    // Agent-mode request: the requested mode/tools must be preserved unchanged.
-    let agent = effective_input_policy(
-        UserInputProvenance::ExternalUser,
-        AppMode::Agent,
-        "你在帮我看看 外卖部分还哪里没有使用多语言",
-        true,
-        true,
-        true,
-        crate::tui::approval::ApprovalMode::Auto,
-    );
-    assert_eq!(agent.mode, AppMode::Agent);
-    assert!(agent.allow_shell);
-    assert!(agent.trust_mode);
-    assert!(agent.auto_approve);
-    assert!(matches!(
-        agent.approval_mode,
-        crate::tui::approval::ApprovalMode::Auto
-    ));
-    assert_eq!(agent.dynamic_active_tools, vec![REQUEST_USER_INPUT_NAME]);
-    assert!(agent.status.as_deref().is_some_and(|status| {
-        status.contains("keeping the current mode") && status.contains("request_user_input")
-    }));
+    for provenance in non_authoritative_origins {
+        for content in ["改吧", "嗯"] {
+            let policy = effective_input_policy(
+                provenance,
+                AppMode::Yolo,
+                content,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+            );
 
-    // Yolo-mode request: previously this was silently downgraded to Plan and
-    // exec_shell/write_file/etc. were stripped. It must now stay as requested.
-    let yolo = effective_input_policy(
-        UserInputProvenance::ExternalUser,
-        AppMode::Yolo,
-        "check the failing tests and review the logs",
-        true,
-        true,
-        true,
-        crate::tui::approval::ApprovalMode::Auto,
-    );
-    assert_eq!(yolo.mode, AppMode::Yolo);
-    assert!(yolo.allow_shell);
-    assert!(yolo.trust_mode);
-    assert!(yolo.auto_approve);
-    assert!(matches!(
-        yolo.approval_mode,
-        crate::tui::approval::ApprovalMode::Auto
-    ));
-    assert_eq!(yolo.dynamic_active_tools, vec![REQUEST_USER_INPUT_NAME]);
-    assert!(yolo.status.as_deref().is_some_and(|status| {
-        status.contains("keeping the current mode") && status.contains("request_user_input")
-    }));
+            assert_eq!(policy.mode, AppMode::Agent, "{provenance:?} {content}");
+            assert!(policy.allow_shell, "{provenance:?} {content}");
+            assert!(!policy.trust_mode, "{provenance:?} {content}");
+            assert!(!policy.auto_approve, "{provenance:?} {content}");
+            assert_eq!(
+                policy.approval_mode,
+                crate::tui::approval::ApprovalMode::Suggest,
+                "{provenance:?} {content}"
+            );
+            assert!(
+                policy.status.as_deref().is_some_and(
+                    |status| status.contains("cannot inherit standing auto-approval authority")
+                ),
+                "{provenance:?} {content}"
+            );
+        }
+    }
+}
 
-    let explicit_write = effective_input_policy(
-        UserInputProvenance::ExternalUser,
-        AppMode::Agent,
-        "检查外卖模块并修复缺少的多语言注入",
-        true,
-        false,
-        false,
-        crate::tui::approval::ApprovalMode::Suggest,
-    );
-    assert_eq!(explicit_write.mode, AppMode::Agent);
-    assert!(explicit_write.dynamic_active_tools.is_empty());
-    assert!(explicit_write.status.is_none());
+#[test]
+fn external_prompt_wording_never_changes_effective_mode_or_authority() {
+    let cases = [
+        (
+            AppMode::Agent,
+            crate::tui::approval::ApprovalMode::Suggest,
+            false,
+            false,
+            "你在帮我看看 外卖部分还哪里没有使用多语言",
+        ),
+        (
+            AppMode::Yolo,
+            crate::tui::approval::ApprovalMode::Bypass,
+            true,
+            true,
+            "check the failing tests and review the logs",
+        ),
+        (
+            AppMode::Agent,
+            crate::tui::approval::ApprovalMode::Suggest,
+            false,
+            false,
+            "检查外卖模块并修复缺少的多语言注入",
+        ),
+    ];
+
+    for (requested_mode, approval_mode, trust_mode, auto_approve, content) in cases {
+        let policy = effective_input_policy(
+            UserInputProvenance::ExternalUser,
+            requested_mode,
+            content,
+            true,
+            trust_mode,
+            auto_approve,
+            approval_mode,
+        );
+
+        assert_eq!(policy.mode, requested_mode, "{content}");
+        assert_eq!(policy.trust_mode, trust_mode, "{content}");
+        assert_eq!(policy.auto_approve, auto_approve, "{content}");
+        assert_eq!(policy.approval_mode, approval_mode, "{content}");
+        assert!(policy.allow_shell, "{content}");
+        assert!(policy.dynamic_active_tools.is_empty(), "{content}");
+        assert!(policy.status.is_none(), "{content}");
+    }
 }
 
 #[test]
