@@ -2220,6 +2220,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             message_count: messages.len(),
             total_tokens: 0,
             model: "deepseek-v4-pro".to_string(),
+            model_provider: "deepseek".to_string(),
             workspace: PathBuf::from("/tmp/resume-recovery"),
             mode: Some("yolo".to_string()),
             cost: crate::session_manager::SessionCostSnapshot::default(),
@@ -2242,7 +2243,7 @@ fn apply_loaded_session_restores_dangling_user_tail_as_retry_draft() {
         "finish the Qthresh proof bundle",
     )]);
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(recovered);
     assert!(app.api_messages.is_empty());
@@ -2272,7 +2273,7 @@ fn apply_loaded_session_does_not_restore_slash_command_tail_as_retry_draft() {
     let mut app = create_test_app();
     let session = saved_session_with_messages(vec![text_message("user", "/sessions")]);
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(!recovered);
     assert_eq!(app.input, "");
@@ -2314,7 +2315,7 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
     session.metadata.total_tokens = 500;
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(!recovered);
     assert_eq!(app.session.total_tokens, 500);
@@ -2357,7 +2358,7 @@ async fn apply_loaded_session_resets_workspace_runtime_state() {
     let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
     session.metadata.workspace = TempDir::new().expect("temp dir").path().to_path_buf();
 
-    let recovered = apply_loaded_session(&mut app, &config, &session);
+    let recovered = apply_loaded_session(&mut app, &mut config, &session);
 
     assert!(!recovered);
     assert_eq!(app.workspace, session.metadata.workspace);
@@ -2420,7 +2421,7 @@ fn apply_loaded_session_updates_current_workspace_display() {
     let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
     session.metadata.workspace = workspace.path().to_path_buf();
 
-    let recovered = apply_loaded_session(&mut app, &config, &session);
+    let recovered = apply_loaded_session(&mut app, &mut config, &session);
     let result = commands::execute("/workspace", &mut app);
 
     assert!(!recovered);
@@ -8671,7 +8672,7 @@ fn apply_loaded_session_restores_concrete_model_mode() {
     ]);
     session.metadata.model = "deepseek-v4-flash".to_string();
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(!recovered);
     assert!(!app.auto_model);
@@ -8692,7 +8693,7 @@ fn apply_loaded_session_restores_auto_model_mode() {
     ]);
     session.metadata.model = "auto".to_string();
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(!recovered);
     assert!(app.auto_model);
@@ -8714,7 +8715,7 @@ fn apply_loaded_session_restores_saved_mode() {
     ]);
     session.metadata.mode = Some("plan".to_string());
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(!recovered);
     assert_eq!(app.mode, crate::tui::app::AppMode::Plan);
@@ -8889,7 +8890,7 @@ fn apply_loaded_session_restores_artifact_registry() {
         storage_path: PathBuf::from("/tmp/tool_outputs/call-big.txt"),
     });
 
-    let recovered = apply_loaded_session(&mut app, &Config::default(), &session);
+    let recovered = apply_loaded_session(&mut app, &mut Config::default(), &session);
 
     assert!(!recovered);
     assert_eq!(app.session_artifacts, session.artifacts);

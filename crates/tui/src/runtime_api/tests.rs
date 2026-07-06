@@ -52,6 +52,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             message_count: 1,
             total_tokens: 0,
             model: "test-model".to_string(),
+            model_provider: "deepseek".to_string(),
             workspace: PathBuf::from("."),
             mode: None,
             cost: Default::default(),
