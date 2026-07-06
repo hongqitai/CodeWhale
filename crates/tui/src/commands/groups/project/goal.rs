@@ -105,7 +105,22 @@ fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
                     app.hunt.continuation_count
                 ))
             } else {
-                CommandResult::message(goal_usage())
+                // Context-dependent bare /goal: with no active goal, the
+                // invocation itself is the ask — derive the objective from
+                // the conversation instead of demanding a restatement
+                // (mirrors bare /workflow). The end-of-turn GoalUpdated
+                // snapshot syncs the created goal into the sidebar.
+                let message = "The user invoked /goal with no objective — declare a goal for the \
+                     CURRENT work. Synthesize the objective from the conversation context (the \
+                     task in flight, recent findings, open items) and set it by calling \
+                     `create_goal` with the full objective (and a token_budget only if one was \
+                     discussed). Then continue working toward it. Only if the conversation \
+                     genuinely contains no work yet, ask the user what the goal should be."
+                    .to_string();
+                CommandResult::with_message_and_action(
+                    "Declaring a goal from the current context...",
+                    AppAction::SendMessage(message),
+                )
             }
         }
     }
@@ -419,11 +434,34 @@ mod tests {
     }
 
     #[test]
-    fn test_hunt_without_argument_shows_state() {
+    fn test_hunt_without_argument_synthesizes_goal_from_context() {
+        // Bare /goal with no active goal is context-dependent: the model
+        // derives the objective from the conversation and sets it via
+        // create_goal — it must not error with a usage demand.
         let mut app = create_test_app();
         let result = hunt(&mut app, None);
+        assert!(!result.is_error);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+        assert!(message.contains("Synthesize the objective from the conversation"));
+        assert!(message.contains("`create_goal`"));
+    }
+
+    #[test]
+    fn test_hunt_without_argument_shows_state_when_goal_active() {
+        // With an active goal, bare /goal stays a status readout.
+        let mut app = create_test_app();
+        let _ = hunt(&mut app, Some("Fix the login bug"));
+        let result = hunt(&mut app, None);
         assert!(result.action.is_none());
-        assert!(result.message.as_deref().unwrap().contains("No goal set"));
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("Fix the login bug")
+        );
     }
 
     #[test]
@@ -642,9 +680,16 @@ mod tests {
 
     #[test]
     fn test_show_hunt_when_none() {
+        // Bare /goal with no active goal now declares one from context
+        // instead of printing usage.
         let mut app = create_test_app();
         let result = hunt(&mut app, None);
-        assert!(result.message.unwrap().contains("No goal set"));
+        assert!(
+            result
+                .message
+                .unwrap()
+                .contains("Declaring a goal from the current context")
+        );
     }
 
     #[test]
