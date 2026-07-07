@@ -345,8 +345,13 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
     // No existing card — only `Started` reasonably opens one. Anything else
     // for an unknown agent_id is dropped (likely arrived after the cell was
     // cleared, e.g. session-resume edge cases).
-    let MailboxMessage::Started { agent_type, .. } = message else {
-        return false;
+    let agent_type = match message {
+        MailboxMessage::Started { agent_type, .. } => agent_type.clone(),
+        MailboxMessage::Completed { .. }
+        | MailboxMessage::Failed { .. }
+        | MailboxMessage::Interrupted { .. }
+        | MailboxMessage::Cancelled { .. } => "unknown".to_string(),
+        _ => return false,
     };
 
     let dispatch_kind = app.pending_subagent_dispatch.as_deref();

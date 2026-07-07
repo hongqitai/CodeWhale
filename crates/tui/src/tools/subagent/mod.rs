@@ -2830,6 +2830,10 @@ impl SubAgentManager {
             self.attach_budget_scope(&agent_id, scope);
         }
 
+        if let Some(mb) = runtime.mailbox.as_ref() {
+            let _ = mb.send(MailboxMessage::started(&agent_id, agent_type.clone()));
+        }
+
         if let Some(event_tx) = runtime.event_tx.clone() {
             let _ = event_tx.try_send(Event::AgentSpawned {
                 id: agent_id.clone(),
@@ -6525,11 +6529,13 @@ fn create_isolated_worktree(
 }
 
 fn git_repo_root(workspace: &Path) -> Result<PathBuf, ToolError> {
+    const MAX_PARENT_LEVELS: usize = 4;
     let start = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
     let mut paths_tried = Vec::new();
     let mut current = Some(start.as_path());
+    let mut levels = 0usize;
 
     while let Some(dir) = current {
         paths_tried.push(dir.display().to_string());
@@ -6543,6 +6549,13 @@ fn git_repo_root(workspace: &Path) -> Result<PathBuf, ToolError> {
             for entry in entries.flatten() {
                 let child = entry.path();
                 if !child.is_dir() || !path_looks_like_git_checkout(&child) {
+                    continue;
+                }
+                if child
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'))
+                {
                     continue;
                 }
                 if let Some(root) = try_git_toplevel(&child) {
@@ -6566,6 +6579,10 @@ fn git_repo_root(workspace: &Path) -> Result<PathBuf, ToolError> {
             }
         }
 
+        levels += 1;
+        if levels > MAX_PARENT_LEVELS {
+            break;
+        }
         current = dir.parent();
     }
 
