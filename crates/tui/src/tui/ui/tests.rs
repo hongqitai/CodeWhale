@@ -225,6 +225,10 @@ fn recover_terminal_modes_emits_expected_csi_sequences_with_gating() {
         !off.contains("\x1b[?1007h"),
         "alternate-scroll mode must stay off when mouse capture is disabled"
     );
+    assert!(
+        off.contains("\x1b[?1007l"),
+        "alternate-scroll mode must be reset when mouse capture is disabled"
+    );
 
     assert!(
         on.contains("\x1b[?1000h"),

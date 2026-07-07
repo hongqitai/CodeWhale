@@ -416,6 +416,10 @@ mod tests {
             "external editor resume must not enable alternate-scroll without mouse capture: {seq:?}"
         );
         assert!(
+            seq.contains("\x1b[?1007l"),
+            "external editor resume must reset alternate-scroll without mouse capture: {seq:?}"
+        );
+        assert!(
             seq.contains("\x1b[?1004h"),
             "external editor resume must still restore focus events: {seq:?}"
         );

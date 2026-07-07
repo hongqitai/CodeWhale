@@ -11567,6 +11567,8 @@ pub(crate) fn recover_terminal_modes<W: Write>(
         if let Err(err) = execute!(writer, EnableMouseCapture) {
             tracing::debug!(?err, "EnableMouseCapture ignored");
         }
+    } else {
+        disable_alternate_scroll_mode(writer);
     }
     if use_bracketed_paste {
         try_enable_bracketed_paste_mode(writer);
