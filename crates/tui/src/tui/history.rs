@@ -872,7 +872,7 @@ impl ExploringCell {
             );
             lines.push(Line::styled(
                 format!("  {dots}  {counts}"),
-                Style::default().fg(palette::DEEPSEEK_SKY),
+                Style::default().fg(palette::WHALE_INFO),
             ));
         }
 

@@ -183,7 +183,7 @@ pub fn footer_agents_chip(running: usize, locale: Locale) -> Vec<Span<'static>> 
     };
     vec![Span::styled(
         text,
-        Style::default().fg(palette::DEEPSEEK_SKY),
+        Style::default().fg(palette::WHALE_INFO),
     )]
 }
 
@@ -661,7 +661,7 @@ impl Renderable for FooterWidget {
         let spacer_span = match self.props.working_strip_frame {
             Some(frame) if spacer_width > 0 => Span::styled(
                 footer_working_strip_string(spacer_width, frame),
-                Style::default().fg(palette::DEEPSEEK_SKY),
+                Style::default().fg(palette::WHALE_INFO),
             ),
             _ => Span::raw(" ".repeat(spacer_width)),
         };
@@ -878,7 +878,7 @@ mod tests {
             &app,
             None,
             "busy",
-            palette::DEEPSEEK_SKY,
+            palette::WHALE_INFO,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
@@ -887,7 +887,7 @@ mod tests {
         );
 
         assert_eq!(props.state_label, "busy");
-        assert_eq!(props.state_color, palette::DEEPSEEK_SKY);
+        assert_eq!(props.state_color, palette::WHALE_INFO);
     }
 
     #[test]
@@ -1225,7 +1225,7 @@ mod tests {
             // Production state labels are `&'static str`; for tests we leak a
             // copy to match that lifetime.
             Box::leak(state.to_string().into_boxed_str()),
-            palette::DEEPSEEK_SKY,
+            palette::WHALE_INFO,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
@@ -1312,7 +1312,7 @@ mod tests {
             &app,
             None,
             Box::leak(state.to_string().into_boxed_str()),
-            palette::DEEPSEEK_SKY,
+            palette::WHALE_INFO,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),

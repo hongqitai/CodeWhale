@@ -1594,6 +1594,9 @@ pub struct App {
     pub next_history_revision: u64,
     pub api_messages: Vec<Message>,
     pub is_loading: bool,
+    /// Timestamp of the most recent Enter while the engine was busy.
+    /// Used by `enter_with_double_tap()` to detect a double-tap within 500 ms.
+    pub last_enter_instant: Option<Instant>,
     /// Whether the once-per-turn provider-wait incident (#3095) has already
     /// been logged for the current turn.
     pub provider_wait_incident_logged: bool,
@@ -2682,6 +2685,7 @@ impl App {
             next_history_revision: 1,
             api_messages: Vec::new(),
             is_loading: false,
+            last_enter_instant: None,
             provider_wait_incident_logged: false,
             prompt_suggestion: None,
             prompt_suggestion_gen: std::sync::atomic::AtomicU64::new(0),
@@ -5653,17 +5657,14 @@ impl App {
 
     /// Decide how to route a fresh composer submit.
     ///
-    /// #382 / v0.8.44: when the model is busy but not actively streaming
-    /// (waiting on tool results, sub-agents, or shell commands), Enter tries
-    /// to steer into the current turn. If steering fails, the message queues.
-    /// During active streaming, Enter always queues to avoid interrupting
-    /// in-flight reasoning. Ctrl+Enter forces Steer in all busy states.
+    /// v0.8.68: busy always queues. A double-tap Enter within 500 ms
+    /// triggers Steer via [`enter_with_double_tap`]; Ctrl+Enter forces
+    /// Steer in all busy states.
     ///
     /// Truth table:
-    ///   offline=F, busy=F           → Immediate
-    ///   offline=F, busy=T+streaming → Queue
-    ///   offline=F, busy=T+waiting   → Steer (fallback Queue)
-    ///   offline=T, busy=*           → Queue
+    ///   offline=F, busy=F → Immediate
+    ///   offline=F, busy=T → Queue (double-tap → Steer)
+    ///   offline=T, busy=* → Queue
     #[must_use]
     pub fn decide_submit_disposition(&self) -> SubmitDisposition {
         if self.offline_mode {
@@ -5672,14 +5673,36 @@ impl App {
         if !self.is_loading {
             return SubmitDisposition::Immediate;
         }
-        // Busy but not streaming text: model is waiting on tool results or
-        // sub-agents — steer so the new message reaches the engine promptly
-        // instead of sitting in the queue until the current turn finishes.
-        if self.streaming_message_index.is_none() {
-            return SubmitDisposition::Steer;
-        }
-        // Actively streaming: queue to avoid interrupting in-flight reasoning.
+        // Busy: queue the message. Double-tap Enter within 500 ms triggers
+        // Steer via enter_with_double_tap(); see the ui.rs submit handler.
         SubmitDisposition::Queue
+    }
+
+    /// Process an Enter keypress with double-tap steering detection.
+    ///
+    /// When the engine is busy, the first Enter queues the message. A second
+    /// Enter within 500 ms triggers Steer (interrupt the current turn to
+    /// inject the new instruction immediately). When idle, Enter submits
+    /// immediately.
+    #[must_use]
+    pub fn enter_with_double_tap(&mut self) -> Option<SubmitDisposition> {
+        let disposition = self.decide_submit_disposition();
+        match disposition {
+            SubmitDisposition::Queue => {
+                if let Some(instant) = self.last_enter_instant
+                    && instant.elapsed() < Duration::from_millis(500)
+                {
+                    self.last_enter_instant = None;
+                    return Some(SubmitDisposition::Steer);
+                }
+                self.last_enter_instant = Some(Instant::now());
+                Some(SubmitDisposition::Queue)
+            }
+            other => {
+                self.last_enter_instant = None;
+                Some(other)
+            }
+        }
     }
 
     /// Mark the in-flight streaming Assistant cell as interrupted: prepend

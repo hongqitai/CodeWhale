@@ -390,7 +390,7 @@ impl ModelPickerView {
         focused: bool,
     ) {
         let border_style = if focused {
-            Style::default().fg(palette::DEEPSEEK_SKY)
+            Style::default().fg(palette::WHALE_INFO)
         } else {
             Style::default().fg(palette::BORDER_COLOR)
         };
@@ -904,12 +904,12 @@ impl ModelPickerView {
                     ModelListView::Catalog => " Model & thinking · all ",
                 },
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = outer.inner(popup_area);
         outer.render(popup_area, buf);
 
@@ -2235,7 +2235,7 @@ mod tests {
             );
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
             // No row exceeds the frame width (no horizontal overflow).

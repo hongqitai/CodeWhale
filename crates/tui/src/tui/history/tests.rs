@@ -1146,8 +1146,8 @@ fn assistant_glyph_holds_full_brightness_when_idle() {
     // source sky — pulse only fires when actively streaming.
     let idle = assistant_label_style_for(false, false);
     let low_motion = assistant_label_style_for(true, true);
-    assert_eq!(idle.fg, Some(palette::DEEPSEEK_SKY));
-    assert_eq!(low_motion.fg, Some(palette::DEEPSEEK_SKY));
+    assert_eq!(idle.fg, Some(palette::WHALE_INFO));
+    assert_eq!(low_motion.fg, Some(palette::WHALE_INFO));
 }
 
 #[test]
@@ -1161,8 +1161,8 @@ fn assistant_glyph_pulses_when_streaming_and_motion_allowed() {
     let mut saw_dimmed = false;
     for _ in 0..50 {
         if let Some(Color::Rgb(_, _, b)) = assistant_label_style_for(true, false).fg {
-            let Color::Rgb(_, _, src_b) = palette::DEEPSEEK_SKY else {
-                panic!("DEEPSEEK_SKY must be RGB");
+            let Color::Rgb(_, _, src_b) = palette::WHALE_INFO else {
+                panic!("WHALE_INFO must be RGB");
             };
             if b < src_b {
                 saw_dimmed = true;

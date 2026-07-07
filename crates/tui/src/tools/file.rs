@@ -10,6 +10,7 @@ use super::spec::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
+#[cfg(feature = "pdf")]
 use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -454,10 +455,14 @@ fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
     if prefer_external {
         read_pdf_via_pdftotext(path, page_range)
     } else {
-        read_pdf_via_pdf_extract(path, page_range)
+        #[cfg(feature = "pdf")]
+        { read_pdf_via_pdf_extract(path, page_range) }
+        #[cfg(not(feature = "pdf"))]
+        { read_pdf_via_pdftotext(path, page_range) }
     }
 }
 
+#[cfg(feature = "pdf")]
 fn read_pdf_via_pdf_extract(
     path: &Path,
     page_range: Option<(u32, u32)>,

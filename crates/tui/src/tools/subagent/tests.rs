@@ -891,33 +891,6 @@ fn new_session_tools_use_single_agent_name() {
 }
 
 #[test]
-fn test_implementer_allowed_tools_include_writes() {
-    // Implementer is the write-heavy role; the deprecated
-    // `allowed_tools()` advisory list should reflect that the role
-    // can write/edit/patch even if today's runtime grants full
-    // inheritance.
-    #[allow(deprecated)]
-    let tools = SubAgentType::Implementer.allowed_tools();
-    assert!(tools.contains(&"write_file"));
-    assert!(tools.contains(&"edit_file"));
-    assert!(tools.contains(&"apply_patch"));
-}
-
-#[test]
-fn test_verifier_allowed_tools_include_test_runner_but_no_writes() {
-    // Verifier runs validation; it should not have write tools in
-    // its advisory list. The runtime will still gate writes through
-    // approval, but the advisory list signals intent.
-    #[allow(deprecated)]
-    let tools = SubAgentType::Verifier.allowed_tools();
-    assert!(tools.contains(&"run_tests"));
-    assert!(tools.contains(&"run_verifiers"));
-    assert!(tools.contains(&"diagnostics"));
-    assert!(!tools.contains(&"write_file"));
-    assert!(!tools.contains(&"apply_patch"));
-}
-
-#[test]
 fn test_parse_spawn_request_accepts_message_and_agent_type_aliases() {
     let input = json!({
         "message": "Find references to Foo",

@@ -140,7 +140,7 @@ impl ToolResult {
     /// Create a successful result from JSON.
     pub fn json<T: Serialize>(value: &T) -> std::result::Result<Self, serde_json::Error> {
         Ok(Self {
-            content: serde_json::to_string_pretty(value)?,
+            content: serde_json::to_string(value)?,
             success: true,
             metadata: None,
         })

@@ -241,7 +241,7 @@ impl<'a> HeaderWidget<'a> {
         } else if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
             palette::STATUS_WARNING
         } else {
-            palette::DEEPSEEK_SKY
+            palette::WHALE_INFO
         }
     }
 
@@ -291,7 +291,7 @@ impl<'a> HeaderWidget<'a> {
         // the chip visually grouped with `● Live` and the effort label.
         vec![Span::styled(
             frame.to_string(),
-            Style::default().fg(palette::DEEPSEEK_SKY),
+            Style::default().fg(palette::WHALE_INFO),
         )]
     }
 
@@ -306,7 +306,7 @@ impl<'a> HeaderWidget<'a> {
         vec![Span::styled(
             trimmed.to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )]
     }
@@ -323,7 +323,7 @@ impl<'a> HeaderWidget<'a> {
         let color = if is_off {
             palette::TEXT_HINT
         } else {
-            palette::DEEPSEEK_SKY
+            palette::WHALE_INFO
         };
         let body = if !include_prefix {
             trimmed.to_string()
@@ -381,7 +381,7 @@ impl<'a> HeaderWidget<'a> {
             spans.push(Span::styled(
                 "●",
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             ));
             if show_stream_label {
@@ -623,7 +623,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             72,
         );
@@ -647,7 +647,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             120,
         );
@@ -668,7 +668,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 true,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(1_000, Some(128_000), 0.0, Some(2_000)),
             12,
@@ -692,7 +692,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "workspace",
                 true,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(42_000, Some(128_000), 0.0, Some(48_000)),
             72,
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn narrow_header_keeps_context_percent_visible() {
         let rendered = render_header(
-            HeaderData::new(AppMode::Agent, "", "", true, palette::DEEPSEEK_INK).with_usage(
+            HeaderData::new(AppMode::Agent, "", "", true, palette::WHALE_BG).with_usage(
                 0,
                 Some(128_000),
                 0.0,
@@ -726,7 +726,7 @@ mod tests {
                 "deepseek-v4-flash",
                 "repo",
                 true,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(1_000, Some(10_000), 0.0, Some(4_000)),
             8,
@@ -745,7 +745,7 @@ mod tests {
                 "deepseek-v4-flash",
                 "repo",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             48,
         );
@@ -762,7 +762,7 @@ mod tests {
                 "deepseek-v4-flash",
                 "repo",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(1_000, Some(128_000), 0.0, Some(320_000)),
             48,
@@ -780,7 +780,7 @@ mod tests {
                 "deepseek-ai/deepseek-v4-flash",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_provider(Some("NIM")),
             72,
@@ -799,7 +799,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             72,
         );
@@ -864,7 +864,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_reasoning_effort(Some("max"))
             .with_status_indicator(Some("🐳")),
@@ -895,7 +895,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_reasoning_effort(Some("max"))
             .with_status_indicator(None),

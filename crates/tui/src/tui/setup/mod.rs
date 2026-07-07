@@ -2849,7 +2849,7 @@ impl ModalView for SetupWizardView {
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_SLATE))
+            .style(Style::default().bg(palette::WHALE_PANEL))
             .padding(Padding::new(2, 2, 1, 1));
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
@@ -2960,7 +2960,7 @@ impl ModalView for SetupWizardView {
             Line::from(Span::styled(
                 tr(self.locale, spec.title_id()).to_string(),
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -5665,7 +5665,7 @@ mod tests {
                 "{w}x{h}: background bleed-through into setup modal"
             );
             assert!(
-                [palette::DEEPSEEK_INK, palette::DEEPSEEK_SLATE].contains(&buf[(w / 2, h / 2)].bg),
+                [palette::WHALE_BG, palette::WHALE_PANEL].contains(&buf[(w / 2, h / 2)].bg),
                 "{w}x{h}: modal interior must be opaque"
             );
             for (y, row) in rows.iter().enumerate() {

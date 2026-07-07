@@ -1431,12 +1431,12 @@ impl ProviderPickerView {
             .title(Line::from(Span::styled(
                 title,
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = outer.inner(area);
         outer.render(area, buf);
 
@@ -1635,12 +1635,12 @@ impl ProviderPickerView {
                     format!(" API key — {} ", row.display_name)
                 },
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = outer.inner(area);
         outer.render(area, buf);
 
@@ -1726,12 +1726,12 @@ impl ProviderPickerView {
             .title(Line::from(Span::styled(
                 " Custom provider ",
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = outer.inner(area);
         outer.render(area, buf);
 
@@ -1806,7 +1806,7 @@ impl ProviderPickerView {
             Style::default().fg(palette::TEXT_PRIMARY)
         };
         let label_style = if selected {
-            Self::selected_row_style(palette::DEEPSEEK_SKY)
+            Self::selected_row_style(palette::WHALE_INFO)
         } else {
             Style::default().fg(palette::TEXT_MUTED)
         };
@@ -3621,7 +3621,7 @@ mod tests {
             );
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
             // No row exceeds the frame width (no horizontal overflow).

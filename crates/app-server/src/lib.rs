@@ -290,7 +290,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
                     None,
                     JsonRpcError::parse_error(format!("invalid json: {err}")),
                 );
-                writer.write_all(response.to_string().as_bytes()).await?;
+                writer.write_all(&serde_json::to_vec(&response)?).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
                 continue;
@@ -306,7 +306,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
                 request.id,
                 JsonRpcError::invalid_request("jsonrpc version must be 2.0"),
             );
-            writer.write_all(response.to_string().as_bytes()).await?;
+            writer.write_all(&serde_json::to_vec(&response)?).await?;
             writer.write_all(b"\n").await?;
             writer.flush().await?;
             continue;
@@ -322,7 +322,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
         {
             Ok(dispatch) => {
                 let encoded = jsonrpc_result(request.id, dispatch.result);
-                writer.write_all(encoded.to_string().as_bytes()).await?;
+                writer.write_all(&serde_json::to_vec(&encoded)?).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
                 if dispatch.should_exit {
@@ -333,7 +333,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
             Err(err) => jsonrpc_error(request.id, err),
         };
 
-        writer.write_all(response.to_string().as_bytes()).await?;
+        writer.write_all(&serde_json::to_vec(&response)?).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
     }
@@ -1152,7 +1152,7 @@ fn turn_terminal_status(payload: &Value) -> TurnTerminalStatus {
 }
 
 async fn emit_stdio_event<W: AsyncWrite + Unpin>(writer: &mut W, event: Value) -> Result<()> {
-    writer.write_all(event.to_string().as_bytes()).await?;
+    writer.write_all(&serde_json::to_vec(&event)?).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())

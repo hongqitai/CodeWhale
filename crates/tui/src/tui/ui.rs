@@ -9090,7 +9090,7 @@ async fn submit_or_steer_message(
     engine_handle: &EngineHandle,
     message: QueuedMessage,
 ) -> Result<()> {
-    match app.decide_submit_disposition() {
+    match app.enter_with_double_tap().unwrap_or(SubmitDisposition::Immediate) {
         SubmitDisposition::Immediate => {
             dispatch_user_message(app, config, engine_handle, message).await
         }
@@ -9588,7 +9588,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
                     .fg(palette::TEXT_MUTED)
             } else {
                 Style::default()
-                    .bg(palette::DEEPSEEK_SLATE)
+                    .bg(palette::WHALE_PANEL)
                     .fg(palette::TEXT_MUTED)
             };
 
@@ -11793,7 +11793,7 @@ fn terminal_event_needs_viewport_recapture(evt: &Event) -> bool {
 
 pub(crate) fn status_color(level: StatusToastLevel) -> ratatui::style::Color {
     match level {
-        StatusToastLevel::Info => palette::DEEPSEEK_SKY,
+        StatusToastLevel::Info => palette::WHALE_INFO,
         StatusToastLevel::Success => palette::STATUS_SUCCESS,
         StatusToastLevel::Warning => palette::STATUS_WARNING,
         StatusToastLevel::Error => palette::STATUS_ERROR,

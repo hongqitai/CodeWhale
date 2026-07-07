@@ -2754,14 +2754,14 @@ fn submit_disposition_immediate_when_idle_and_online() {
 }
 
 #[test]
-fn submit_disposition_steer_when_busy_and_online_not_streaming() {
-    // v0.8.44: Busy + not streaming → Steer (Enter reaches engine during
-    // sub-agent/shell waits instead of silently queueing).
+fn submit_disposition_queue_when_busy_and_online_not_streaming() {
+    // Double-enter steer: Busy + not streaming now returns Queue; steering
+    // is triggered externally via enter_with_double_tap() or Ctrl+Enter.
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.offline_mode = false;
     // streaming_message_index is None (default) → tool execution phase
-    assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Steer);
+    assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Queue);
 }
 
 #[test]
@@ -2790,6 +2790,49 @@ fn submit_disposition_offline_busy_queues() {
     // Offline mode always queues, even when streaming
     app.streaming_message_index = Some(0);
     assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Queue);
+}
+
+#[test]
+fn double_enter_detects_steering() {
+    let mut app = App::new(test_options(false), &Config::default());
+    // Simulate a busy engine (not streaming) so decide_submit_disposition
+    // returns Queue rather than Immediate.
+    app.is_loading = true;
+
+    // First Enter → Queue (normal queueing)
+    let first = app.enter_with_double_tap();
+    assert_eq!(first, Some(SubmitDisposition::Queue));
+
+    // Second Enter within 500ms → Steer (double-tap detected)
+    let second = app.enter_with_double_tap();
+    assert_eq!(second, Some(SubmitDisposition::Steer));
+}
+
+#[test]
+fn double_enter_resets_after_timeout() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.is_loading = true;
+
+    // First Enter → Queue
+    let first = app.enter_with_double_tap();
+    assert_eq!(first, Some(SubmitDisposition::Queue));
+
+    // Simulate timeout by clearing last_enter_instant
+    app.last_enter_instant = None;
+
+    // Next Enter → Queue again (not Steer, because window expired)
+    let second = app.enter_with_double_tap();
+    assert_eq!(second, Some(SubmitDisposition::Queue));
+}
+
+#[test]
+fn double_enter_passes_through_when_idle() {
+    let mut app = App::new(test_options(false), &Config::default());
+    // Engine idle → Immediate (not affected by double-tap)
+    let first = app.enter_with_double_tap();
+    assert_eq!(first, Some(SubmitDisposition::Immediate));
+    let second = app.enter_with_double_tap();
+    assert_eq!(second, Some(SubmitDisposition::Immediate));
 }
 
 #[test]

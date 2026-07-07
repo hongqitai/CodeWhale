@@ -465,7 +465,7 @@ impl HotbarSetupView {
             Span::styled(
                 value,
                 Style::default().fg(if self.filter_focused {
-                    palette::DEEPSEEK_SKY
+                    palette::WHALE_INFO
                 } else {
                     palette::TEXT_PRIMARY
                 }),
@@ -530,7 +530,7 @@ impl HotbarSetupView {
             text,
             Style::default()
                 .fg(if selected {
-                    palette::DEEPSEEK_SKY
+                    palette::WHALE_INFO
                 } else {
                     palette::TEXT_PRIMARY
                 })
@@ -795,7 +795,7 @@ impl ModalView for HotbarSetupView {
             .title(" Hotbar setup ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
 
@@ -1305,7 +1305,7 @@ mod tests {
             assert!(!text.contains('X'), "{w}x{h}: background bleed-through");
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
 

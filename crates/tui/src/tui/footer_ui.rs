@@ -112,7 +112,7 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         }
         if !label.is_empty() {
             props.state_label = label;
-            props.state_color = palette::DEEPSEEK_SKY;
+            props.state_color = palette::WHALE_INFO;
         }
         if active_subagent_label.is_some() {
             props.agents.clear();
