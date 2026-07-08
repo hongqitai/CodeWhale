@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -873,10 +873,13 @@ pub struct RuntimeThreadManager {
     event_tx: broadcast::Sender<RuntimeEventRecord>,
     manager_cfg: RuntimeThreadManagerConfig,
     cancel_token: CancellationToken,
-    task_manager: Arc<StdMutex<Option<crate::task_manager::SharedTaskManager>>>,
-    automations: Arc<StdMutex<Option<crate::automation_manager::SharedAutomationManager>>>,
-    pending_approvals: Arc<StdMutex<HashMap<String, oneshot::Sender<ExternalApprovalDecision>>>>,
-    pending_dynamic_tools: Arc<StdMutex<HashMap<String, oneshot::Sender<DynamicToolCallResult>>>>,
+    task_manager: Arc<parking_lot::Mutex<Option<crate::task_manager::SharedTaskManager>>>,
+    automations:
+        Arc<parking_lot::Mutex<Option<crate::automation_manager::SharedAutomationManager>>>,
+    pending_approvals:
+        Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<ExternalApprovalDecision>>>>,
+    pending_dynamic_tools:
+        Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<DynamicToolCallResult>>>>,
 }
 
 /// Helper types for `seed_thread_from_messages` — intermediate representation
@@ -1044,10 +1047,10 @@ impl RuntimeThreadManager {
             event_tx,
             manager_cfg,
             cancel_token: CancellationToken::new(),
-            task_manager: Arc::new(StdMutex::new(None)),
-            automations: Arc::new(StdMutex::new(None)),
-            pending_approvals: Arc::new(StdMutex::new(HashMap::new())),
-            pending_dynamic_tools: Arc::new(StdMutex::new(HashMap::new())),
+            task_manager: Arc::new(parking_lot::Mutex::new(None)),
+            automations: Arc::new(parking_lot::Mutex::new(None)),
+            pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            pending_dynamic_tools: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         };
         manager.recover_interrupted_state()?;
         Ok(manager)
@@ -1056,9 +1059,7 @@ impl RuntimeThreadManager {
     /// Attach the durable task manager so model-visible task tools work inside
     /// runtime thread turns as well as interactive TUI turns.
     pub fn attach_task_manager(&self, task_manager: crate::task_manager::SharedTaskManager) {
-        if let Ok(mut slot) = self.task_manager.lock() {
-            *slot = Some(task_manager);
-        }
+        *self.task_manager.lock() = Some(task_manager);
     }
 
     /// Attach the automation manager for model-visible scheduling tools.
@@ -1066,20 +1067,14 @@ impl RuntimeThreadManager {
         &self,
         automations: crate::automation_manager::SharedAutomationManager,
     ) {
-        if let Ok(mut slot) = self.automations.lock() {
-            *slot = Some(automations);
-        }
+        *self.automations.lock() = Some(automations);
     }
 
     #[allow(dead_code)] // Public API for external callers (runtime API, task manager)
     pub fn shutdown(&self) {
         self.cancel_token.cancel();
-        if let Ok(mut map) = self.pending_approvals.lock() {
-            map.clear();
-        }
-        if let Ok(mut map) = self.pending_dynamic_tools.lock() {
-            map.clear();
-        }
+        self.pending_approvals.lock().clear();
+        self.pending_dynamic_tools.lock().clear();
     }
 
     #[allow(dead_code)] // Public API for external callers
@@ -1092,16 +1087,14 @@ impl RuntimeThreadManager {
         approval_id: &str,
     ) -> oneshot::Receiver<ExternalApprovalDecision> {
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut map) = self.pending_approvals.lock() {
-            map.insert(approval_id.to_string(), tx);
-        }
+        self.pending_approvals
+            .lock()
+            .insert(approval_id.to_string(), tx);
         rx
     }
 
     fn cancel_pending_approval(&self, approval_id: &str) {
-        if let Ok(mut map) = self.pending_approvals.lock() {
-            map.remove(approval_id);
-        }
+        self.pending_approvals.lock().remove(approval_id);
     }
 
     fn register_pending_dynamic_tool(
@@ -1109,16 +1102,14 @@ impl RuntimeThreadManager {
         call_id: &str,
     ) -> oneshot::Receiver<DynamicToolCallResult> {
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut map) = self.pending_dynamic_tools.lock() {
-            map.insert(call_id.to_string(), tx);
-        }
+        self.pending_dynamic_tools
+            .lock()
+            .insert(call_id.to_string(), tx);
         rx
     }
 
     fn cancel_pending_dynamic_tool(&self, call_id: &str) {
-        if let Ok(mut map) = self.pending_dynamic_tools.lock() {
-            map.remove(call_id);
-        }
+        self.pending_dynamic_tools.lock().remove(call_id);
     }
 
     pub fn deliver_external_approval(
@@ -1126,13 +1117,7 @@ impl RuntimeThreadManager {
         approval_id: &str,
         decision: ExternalApprovalDecision,
     ) -> bool {
-        let sender = match self.pending_approvals.lock() {
-            Ok(mut map) => map.remove(approval_id),
-            Err(e) => {
-                tracing::error!("pending_approvals mutex poisoned: {e}");
-                return false;
-            }
-        };
+        let sender = self.pending_approvals.lock().remove(approval_id);
         match sender {
             Some(tx) => tx.send(decision).is_ok(),
             None => false,
@@ -1144,13 +1129,7 @@ impl RuntimeThreadManager {
         call_id: &str,
         result: DynamicToolCallResult,
     ) -> bool {
-        let sender = match self.pending_dynamic_tools.lock() {
-            Ok(mut map) => map.remove(call_id),
-            Err(e) => {
-                tracing::error!("pending_dynamic_tools mutex poisoned: {e}");
-                return false;
-            }
-        };
+        let sender = self.pending_dynamic_tools.lock().remove(call_id);
         match sender {
             Some(tx) => tx.send(result).is_ok(),
             None => false,
@@ -1183,18 +1162,12 @@ impl RuntimeThreadManager {
 
     #[allow(dead_code)]
     pub fn pending_approvals_count(&self) -> usize {
-        self.pending_approvals
-            .lock()
-            .map(|map| map.len())
-            .unwrap_or(0)
+        self.pending_approvals.lock().len()
     }
 
     #[allow(dead_code)]
     pub fn pending_dynamic_tools_count(&self) -> usize {
-        self.pending_dynamic_tools
-            .lock()
-            .map(|map| map.len())
-            .unwrap_or(0)
+        self.pending_dynamic_tools.lock().len()
     }
 
     #[cfg(test)]
@@ -2641,8 +2614,8 @@ impl RuntimeThreadManager {
                 .saturating_mul(1024 * 1024 * 1024),
             lsp_config,
             runtime_services: crate::tools::spec::RuntimeToolServices {
-                task_manager: self.task_manager.lock().ok().and_then(|slot| slot.clone()),
-                automations: self.automations.lock().ok().and_then(|slot| slot.clone()),
+                task_manager: self.task_manager.lock().clone(),
+                automations: self.automations.lock().clone(),
                 task_data_dir: Some(self.manager_cfg.task_data_dir.clone()),
                 active_task_id: thread.task_id.clone(),
                 active_thread_id: Some(thread.id.clone()),
