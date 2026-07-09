@@ -4360,12 +4360,15 @@ export default workflow({
             .and_then(Value::as_str)
             .expect("run_id metadata");
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("workflow should spawn at least one child before cancel");
         let calls_before_cancel = calls.load(Ordering::SeqCst);
-        assert!(
-            calls_before_cancel >= 1,
-            "workflow should spawn at least one child before cancel"
-        );
+        assert!(calls_before_cancel >= 1);
 
         let cancelled = tool
             .execute(json!({"action": "cancel", "run_id": run_id}), &ctx)
