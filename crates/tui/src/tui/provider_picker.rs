@@ -2028,12 +2028,15 @@ impl ProviderPickerView {
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let default_tag = self.rows[self.selected_idx]
+            let default_tag = if self.rows[self.selected_idx]
                 .default_route
                 .logical_model
                 .eq_ignore_ascii_case(model)
-                .then_some("default")
-                .unwrap_or("");
+            {
+                "default"
+            } else {
+                ""
+            };
             let mut line = Line::from(vec![
                 Span::styled(format!(" {arrow} {model}"), label_style),
                 if default_tag.is_empty() {
